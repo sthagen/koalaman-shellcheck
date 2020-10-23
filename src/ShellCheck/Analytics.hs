@@ -240,6 +240,13 @@ optionalTreeChecks = [
         cdPositive = "echo $VAR",
         cdNegative = "VAR=hello; echo $VAR"
     }, checkUnassignedReferences' True)
+
+    ,(newCheckDescription {
+        cdName = "avoid-x-comparisons",
+        cdDescription = "Warn about 'x'-prefix in comparisons",
+        cdPositive = "[ \"x$var\" = xval ]",
+        cdNegative = "[ \"$var\" = val ]"
+    }, nodeChecksToTreeCheck [checkComparisonWithLeadingX])
     ]
 
 optionalCheckMap :: Map.Map String (Parameters -> Token -> [TokenComment])
@@ -851,7 +858,8 @@ prop_checkArrayWithoutIndex6 = verifyTree checkArrayWithoutIndex "echo $PIPESTAT
 prop_checkArrayWithoutIndex7 = verifyTree checkArrayWithoutIndex "a=(a b); a+=c"
 prop_checkArrayWithoutIndex8 = verifyTree checkArrayWithoutIndex "declare -a foo; foo=bar;"
 prop_checkArrayWithoutIndex9 = verifyTree checkArrayWithoutIndex "read -r -a arr <<< 'foo bar'; echo \"$arr\""
-prop_checkArrayWithoutIndex10= verifyTree checkArrayWithoutIndex "read -ra arr <<< 'foo bar'; echo \"$arr\""
+prop_checkArrayWithoutIndex10 = verifyTree checkArrayWithoutIndex "read -ra arr <<< 'foo bar'; echo \"$arr\""
+prop_checkArrayWithoutIndex11 = verifyNotTree checkArrayWithoutIndex "read -rpfoobar r; r=42"
 checkArrayWithoutIndex params _ =
     doVariableFlowAnalysis readF writeF defaultMap (variableFlow params)
   where
@@ -2134,6 +2142,7 @@ prop_checkUnused13= verifyNotTree checkUnusedAssignments "x=(1); (( x[0] ))"
 prop_checkUnused14= verifyNotTree checkUnusedAssignments "x=(1); n=0; echo ${x[n]}"
 prop_checkUnused15= verifyNotTree checkUnusedAssignments "x=(1); n=0; (( x[n] ))"
 prop_checkUnused16= verifyNotTree checkUnusedAssignments "foo=5; declare -x foo"
+prop_checkUnused16b= verifyNotTree checkUnusedAssignments "f() { local -x foo; foo=42; bar; }; f"
 prop_checkUnused17= verifyNotTree checkUnusedAssignments "read -i 'foo' -e -p 'Input: ' bar; $bar;"
 prop_checkUnused18= verifyNotTree checkUnusedAssignments "a=1; arr=( [$a]=42 ); echo \"${arr[@]}\""
 prop_checkUnused19= verifyNotTree checkUnusedAssignments "a=1; let b=a+1; echo $b"
@@ -2924,8 +2933,8 @@ checkReadWithoutR _ t@T_SimpleCommand {} | t `isUnqualifiedCommand` "read"
   where
     flags = getAllFlags t
     has_t0 = Just "0" == do
-        parsed <- getOpts flagsForRead flags
-        t <- lookup "t" parsed
+        parsed <- getGnuOpts flagsForRead $ arguments t
+        (_, t) <- lookup "t" parsed
         getLiteralString t
 
 checkReadWithoutR _ _ = return ()
@@ -3382,7 +3391,7 @@ checkPipeToNowhere params t =
 
     commandSpecificException name cmd =
         case name of
-            "du" -> any (`elem` ["exclude-from", "files0-from"]) $ lt $ map snd $ getAllFlags cmd
+            "du" -> any (`elem` ["exclude-from", "files0-from"]) $ map snd $ getAllFlags cmd
             _ -> False
 
     warnAboutDupes (n, list@(_:_:_)) =
@@ -3924,6 +3933,41 @@ checkBadTestAndOr params t =
             T_Annotation _ _ t -> isTest t
             _ -> False
 
+prop_checkComparisonWithLeadingX1 = verify checkComparisonWithLeadingX "[ x$foo = xlol ]"
+prop_checkComparisonWithLeadingX2 = verify checkComparisonWithLeadingX "test x$foo = xlol"
+prop_checkComparisonWithLeadingX3 = verifyNot checkComparisonWithLeadingX "[ $foo = xbar ]"
+prop_checkComparisonWithLeadingX4 = verifyNot checkComparisonWithLeadingX "test $foo = xbar"
+prop_checkComparisonWithLeadingX5 = verify checkComparisonWithLeadingX "[ \"x$foo\" = 'xlol' ]"
+prop_checkComparisonWithLeadingX6 = verify checkComparisonWithLeadingX "[ x\"$foo\" = x'lol' ]"
+checkComparisonWithLeadingX params t =
+    case t of
+        TC_Binary id typ op lhs rhs | op == "=" || op == "==" ->
+            check lhs rhs
+        T_SimpleCommand _ _ [cmd, lhs, op, rhs] |
+            getLiteralString cmd == Just "test" &&
+                getLiteralString op `elem` [Just "=", Just "=="] ->
+                    check lhs rhs
+        _ -> return ()
+  where
+    msg = "Avoid outdated x-prefix in comparisons as it no longer serves a purpose."
+    check lhs rhs = sequence_ $ do
+        l <- fixLeadingX lhs
+        r <- fixLeadingX rhs
+        return $ styleWithFix (getId lhs) 2268 msg $ fixWith [l, r]
+
+    fixLeadingX token =
+         case getWordParts token of
+            T_Literal id ('x':_):_ ->
+                case token of
+                    -- The side is a single, unquoted x, so we have to quote
+                    T_NormalWord _ [T_Literal id "x"] ->
+                        return $ replaceStart id params 1 "\"\""
+                    -- Otherwise we can just delete it
+                    _ -> return $ replaceStart id params 1 ""
+            T_SingleQuoted id ('x':_):_ ->
+                -- Replace the single quote and x
+                return $ replaceStart id params 2 "'"
+            _ -> Nothing
 
 return []
 runTests =  $( [| $(forAllProperties) (quickCheckWithResult (stdArgs { maxSuccess = 1 }) ) |])

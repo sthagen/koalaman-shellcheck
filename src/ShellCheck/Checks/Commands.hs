@@ -53,8 +53,6 @@ verify :: CommandCheck -> String -> Bool
 verify f s = producesComments (getChecker [f]) s == Just True
 verifyNot f s = producesComments (getChecker [f]) s == Just False
 
-arguments (T_SimpleCommand _ _ (cmd:args)) = args
-
 commandChecks :: [CommandCheck]
 commandChecks = [
     checkTr
@@ -96,6 +94,7 @@ commandChecks = [
     ,checkSudoArgs
     ,checkSourceArgs
     ,checkChmodDashr
+    ,checkXargsDashi
     ]
 
 optionalChecks = map fst optionalCommandChecks
@@ -115,6 +114,35 @@ prop_verifyOptionalExamples = all check optionalCommandChecks
     check (desc, check) =
       verify check (cdPositive desc)
       && verifyNot check (cdNegative desc)
+
+-- Run a check against the getopt parser. If it fails, the lists are empty.
+checkGetOpts str flags args f =
+    flags == actualFlags && args == actualArgs
+  where
+    toTokens = map (T_Literal (Id 0)) . words
+    opts = fromMaybe [] $ f (toTokens str)
+    actualFlags = filter (not . null) $ map fst opts
+    actualArgs = map (\(_, (_, x)) -> onlyLiteralString x) $ filter (null . fst) opts
+
+-- Short options
+prop_checkGetOptsS1 = checkGetOpts "-f x" ["f"] [] $ getOpts (True, True) "f:" []
+prop_checkGetOptsS2 = checkGetOpts "-fx" ["f"] [] $ getOpts (True, True) "f:" []
+prop_checkGetOptsS3 = checkGetOpts "-f -x" ["f", "x"] [] $ getOpts (True, True) "fx" []
+prop_checkGetOptsS4 = checkGetOpts "-f -x" ["f"] [] $ getOpts (True, True) "f:" []
+prop_checkGetOptsS5 = checkGetOpts "-fx" [] [] $ getOpts (True, True) "fx:" []
+
+-- Long options
+prop_checkGetOptsL1 = checkGetOpts "--foo=bar baz" ["foo"] ["baz"] $ getOpts (True, False) "" [("foo", True)]
+prop_checkGetOptsL2 = checkGetOpts "--foo bar baz" ["foo"] ["baz"] $ getOpts (True, False) "" [("foo", True)]
+prop_checkGetOptsL3 = checkGetOpts "--foo baz" ["foo"] ["baz"] $ getOpts (True, True) "" []
+prop_checkGetOptsL4 = checkGetOpts "--foo baz" [] [] $ getOpts (True, False) "" []
+
+-- Know when to terminate
+prop_checkGetOptsT1 = checkGetOpts "-a x -b" ["a", "b"] ["x"] $ getOpts (True, True) "ab" []
+prop_checkGetOptsT2 = checkGetOpts "-a x -b" ["a"] ["x","-b"] $ getOpts (False, True) "ab" []
+prop_checkGetOptsT3 = checkGetOpts "-a -- -b" ["a"] ["-b"] $ getOpts (True, True) "ab" []
+prop_checkGetOptsT4 = checkGetOpts "-a -- -b" ["a", "b"] [] $ getOpts (True, True) "a:b" []
+
 
 buildCommandMap :: [CommandCheck] -> Map.Map CommandName (Token -> Analysis)
 buildCommandMap = foldl' addCheck Map.empty
@@ -694,8 +722,8 @@ checkReadExpansions = CommandCheck (Exactly "read") check
   where
     options = getGnuOpts flagsForRead
     getVars cmd = fromMaybe [] $ do
-        opts <- options cmd
-        return [y | (x,y) <- opts, null x || x == "a"]
+        opts <- options $ arguments cmd
+        return [y | (x,(_, y)) <- opts, null x || x == "a"]
 
     check cmd = mapM_ warning $ getVars cmd
     warning t = sequence_ $ do
@@ -1070,8 +1098,8 @@ prop_checkSudoArgs7 = verifyNot checkSudoArgs "sudo docker export foo"
 checkSudoArgs = CommandCheck (Basename "sudo") f
   where
     f t = sequence_ $ do
-        opts <- parseOpts t
-        let nonFlags = [x | ("",x) <- opts]
+        opts <- parseOpts $ arguments t
+        let nonFlags = [x | ("",(x, _)) <- opts]
         commandArg <- nonFlags !!! 0
         command <- getLiteralString commandArg
         guard $ command `elem` builtins
@@ -1101,6 +1129,19 @@ checkChmodDashr = CommandCheck (Basename "chmod") f
         flag <- getLiteralString t
         guard $ flag == "-r"
         return $ warn (getId t) 2253 "Use -R to recurse, or explicitly a-r to remove read permissions."
+
+prop_checkXargsDashi1 = verify checkXargsDashi "xargs -i{} echo {}"
+prop_checkXargsDashi2 = verifyNot checkXargsDashi "xargs -I{} echo {}"
+prop_checkXargsDashi3 = verifyNot checkXargsDashi "xargs sed -i -e foo"
+prop_checkXargsDashi4 = verify checkXargsDashi "xargs -e sed -i foo"
+prop_checkXargsDashi5 = verifyNot checkXargsDashi "xargs -x sed -i foo"
+checkXargsDashi = CommandCheck (Basename "xargs") f
+  where
+    f t = sequence_ $ do
+        opts <- parseOpts $ arguments t
+        (option, value) <- lookup "i" opts
+        return $ info (getId option) 2267 "GNU xargs -i is deprecated in favor of -I{}"
+    parseOpts = getBsdOpts "0oprtxadR:S:J:L:l:n:P:s:e:E:i:I:"
 
 return []
 runTests =  $( [| $(forAllProperties) (quickCheckWithResult (stdArgs { maxSuccess = 1 }) ) |])
