@@ -2361,6 +2361,7 @@ prop_checkWhileReadPitfalls11 = verifyNot checkWhileReadPitfalls "while read foo
 prop_checkWhileReadPitfalls12 = verifyNot checkWhileReadPitfalls "while read foo\ndo\nmplayer foo.ogv << EOF\nq\nEOF\ndone"
 prop_checkWhileReadPitfalls13 = verify checkWhileReadPitfalls "while read foo; do x=$(ssh host cmd); done"
 prop_checkWhileReadPitfalls14 = verify checkWhileReadPitfalls "while read foo; do echo $(ssh host cmd) < /dev/null; done"
+prop_checkWhileReadPitfalls15 = verify checkWhileReadPitfalls "while read foo; do ssh $foo cmd & done"
 
 checkWhileReadPitfalls params (T_WhileExpression id [command] contents)
         | isStdinReadCommand command =
@@ -2411,6 +2412,7 @@ checkWhileReadPitfalls params (T_WhileExpression id [command] contents)
                     warnWithFix (getId cmd) 2095
                         ("Use " ++ name ++ " " ++ flag ++ " to prevent " ++ name ++ " from swallowing stdin.")
                         (fix flag cmd)
+    checkMuncher (T_Backgrounded _ t) = checkMuncher t
     checkMuncher _ = return ()
 
     stdinRedirect (T_FdRedirect _ fd op)
@@ -2902,11 +2904,14 @@ checkTestArgumentSplitting params t =
 prop_checkMaskedReturns1 = verify checkMaskedReturns "f() { local a=$(false); }"
 prop_checkMaskedReturns2 = verify checkMaskedReturns "declare a=$(false)"
 prop_checkMaskedReturns3 = verify checkMaskedReturns "declare a=\"`false`\""
-prop_checkMaskedReturns4 = verifyNot checkMaskedReturns "declare a; a=$(false)"
-prop_checkMaskedReturns5 = verifyNot checkMaskedReturns "f() { local -r a=$(false); }"
+prop_checkMaskedReturns4 = verify checkMaskedReturns "readonly a=$(false)"
+prop_checkMaskedReturns5 = verify checkMaskedReturns "readonly a=\"`false`\""
+prop_checkMaskedReturns6 = verifyNot checkMaskedReturns "declare a; a=$(false)"
+prop_checkMaskedReturns7 = verifyNot checkMaskedReturns "f() { local -r a=$(false); }"
+prop_checkMaskedReturns8 = verifyNot checkMaskedReturns "a=$(false); readonly a"
 checkMaskedReturns _ t@(T_SimpleCommand id _ (cmd:rest)) = sequence_ $ do
     name <- getCommandName t
-    guard $ name `elem` ["declare", "export"]
+    guard $ name `elem` ["declare", "export", "readonly"]
         || name == "local" && "r" `notElem` map snd (getAllFlags t)
     return $ mapM_ checkArgs rest
   where
