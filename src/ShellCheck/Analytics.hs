@@ -1759,7 +1759,7 @@ checkSshHereDoc _ (T_Redirecting _ redirs cmd)
     hasVariables = mkRegex "[`$]"
     checkHereDoc (T_FdRedirect _ _ (T_HereDoc id _ Unquoted token tokens))
         | not (all isConstant tokens) =
-        warn id 2087 $ "Quote '" ++ token ++ "' to make here document expansions happen on the server side rather than on the client."
+        warn id 2087 $ "Quote '" ++ (e4m token) ++ "' to make here document expansions happen on the server side rather than on the client."
     checkHereDoc _ = return ()
 checkSshHereDoc _ _ = return ()
 
@@ -2694,7 +2694,7 @@ checkUnpassedInFunctions params root =
 
     suggestParams (name, _, thing) =
         info (getId thing) 2119 $
-            "Use " ++ name ++ " \"$@\" if function's $1 should mean script's $1."
+            "Use " ++ (e4m name) ++ " \"$@\" if function's $1 should mean script's $1."
     warnForDeclaration func name =
         warn (getId func) 2120 $
             name ++ " references arguments, but none are ever passed."
@@ -4236,16 +4236,22 @@ checkSecondArgIsComparison _ t =
             case argString of
                 '=':'=':'=':'=':_ -> Nothing -- Don't warn about `echo ======` and such
                 '+':'=':_ ->
-                        return $ err (getId t) 2285 $
+                        return $ err (headId t) 2285 $
                             "Remove spaces around += to assign (or quote '+=' if literal)."
                 '=':'=':_ ->
                         return $ err (getId t) 2284 $
                             "Use [ x = y ] to compare values (or quote '==' if literal)."
                 '=':_ ->
-                        return $ err (getId t) 2283 $
-                            "Use [ ] to compare values, or remove spaces around = to assign (or quote '=' if literal)."
+                        return $ err (headId arg) 2283 $
+                            "Remove spaces around = to assign (or use [ ] to compare, or quote '=' if literal)."
                 _ -> Nothing
         _ -> return ()
+  where
+    -- We don't pinpoint exactly, but this helps cases like foo =$bar
+    headId t =
+        case t of
+            T_NormalWord _ (x:_) -> getId x
+            _ -> getId t
 
 return []
 runTests =  $( [| $(forAllProperties) (quickCheckWithResult (stdArgs { maxSuccess = 1 }) ) |])
