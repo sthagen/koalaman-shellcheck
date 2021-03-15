@@ -590,6 +590,12 @@ prop_checkShebang9 = verifyNotTree checkShebang "# shellcheck shell=sh\ntrue"
 prop_checkShebang10= verifyNotTree checkShebang "#!foo\n# shellcheck shell=sh ignore=SC2239\ntrue"
 prop_checkShebang11= verifyTree checkShebang "#!/bin/sh/\ntrue"
 prop_checkShebang12= verifyTree checkShebang "#!/bin/sh/ -xe\ntrue"
+prop_checkShebang13= verifyTree checkShebang "#!/bin/busybox sh"
+prop_checkShebang14= verifyNotTree checkShebang "#!/bin/busybox sh\n# shellcheck shell=sh\n"
+prop_checkShebang15= verifyNotTree checkShebang "#!/bin/busybox sh\n# shellcheck shell=dash\n"
+prop_checkShebang16= verifyTree checkShebang "#!/bin/busybox ash"
+prop_checkShebang17= verifyNotTree checkShebang "#!/bin/busybox ash\n# shellcheck shell=dash\n"
+prop_checkShebang18= verifyNotTree checkShebang "#!/bin/busybox ash\n# shellcheck shell=sh\n"
 checkShebang params (T_Annotation _ list t) =
     if any isOverride list then [] else checkShebang params t
   where
@@ -1015,6 +1021,7 @@ checkSingleQuotedVariables params t@(T_SingleQuoted id s) =
                 ,"alias"
                 ,"sudo" -- covering "sudo sh" and such
                 ,"docker" -- like above
+                ,"podman"
                 ,"dpkg-query"
                 ,"jq"  -- could also check that user provides --arg
                 ,"rename"
@@ -1216,8 +1223,8 @@ checkQuotedCondRegex _ (TC_Binary _ _ "=~" _ rhs) =
   where
     error t =
         unless (isConstantNonRe t) $
-            err (getId t) 2076
-                "Don't quote right-hand side of =~, it'll match literally rather than as a regex."
+            warn (getId t) 2076
+                "Remove quotes from right-hand side of =~ to match as a regex rather than literally."
     re = mkRegex "[][*.+()|]"
     hasMetachars s = s `matches` re
     isConstantNonRe t = fromMaybe False $ do
