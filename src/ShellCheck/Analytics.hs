@@ -196,6 +196,7 @@ nodeChecks = [
     ,checkAssignToSelf
     ,checkEqualsInCommand
     ,checkSecondArgIsComparison
+    ,checkComparisonWithLeadingX
     ]
 
 optionalChecks = map fst optionalTreeChecks
@@ -243,13 +244,6 @@ optionalTreeChecks = [
         cdPositive = "echo $VAR",
         cdNegative = "VAR=hello; echo $VAR"
     }, checkUnassignedReferences' True)
-
-    ,(newCheckDescription {
-        cdName = "avoid-x-comparisons",
-        cdDescription = "Warn about 'x'-prefix in comparisons",
-        cdPositive = "[ \"x$var\" = xval ]",
-        cdNegative = "[ \"$var\" = val ]"
-    }, nodeChecksToTreeCheck [checkComparisonWithLeadingX])
     ]
 
 optionalCheckMap :: Map.Map String (Parameters -> Token -> [TokenComment])
@@ -826,10 +820,17 @@ checkShorthandIf _ _ = return ()
 prop_checkDollarStar = verify checkDollarStar "for f in $*; do ..; done"
 prop_checkDollarStar2 = verifyNot checkDollarStar "a=$*"
 prop_checkDollarStar3 = verifyNot checkDollarStar "[[ $* = 'a b' ]]"
+prop_checkDollarStar4 = verify checkDollarStar "for f in ${var[*]}; do ..; done"
+prop_checkDollarStar5 = verify checkDollarStar "ls ${*//foo/bar}"
+prop_checkDollarStar6 = verify checkDollarStar "ls ${var[*]%%.*}"
 checkDollarStar p t@(T_NormalWord _ [T_DollarBraced id _ l])
-      | concat (oversimplify l) == "*" &&
-        not (isStrictlyQuoteFree (parentMap p) t) =
+        | not (isStrictlyQuoteFree (parentMap p) t) = do
+      let str = concat (oversimplify l)
+      when ("*" `isPrefixOf` str) $
             warn id 2048 "Use \"$@\" (with quotes) to prevent whitespace problems."
+      when ("[*]" `isPrefixOf` (getBracedModifier str)) $
+            warn id 2048 "Use \"${array[@]}\" (with quotes) to prevent whitespace problems."
+
 checkDollarStar _ _ = return ()
 
 
@@ -4006,7 +4007,7 @@ checkComparisonWithLeadingX params t =
                     check lhs rhs
         _ -> return ()
   where
-    msg = "Avoid outdated x-prefix in comparisons as it no longer serves a purpose."
+    msg = "Avoid x-prefix in comparisons as it no longer serves a purpose."
     check lhs rhs = sequence_ $ do
         l <- fixLeadingX lhs
         r <- fixLeadingX rhs
@@ -4161,11 +4162,11 @@ checkEqualsInCommand params originalToken =
                     _ | "===" `isPrefixOf` s -> borderMsg (getId originalToken)
                     _ -> prefixMsg (getId cmd)
 
-            -- $var==42
+            -- '$var==42'
             _ | "==" `isInfixOf` s ->
                 badComparisonMsg (getId cmd)
 
-            -- ${foo[x]}=42 and $foo=42
+            -- '${foo[x]}=42' and '$foo=42'
             [T_DollarBraced id braced l] | "=" `isPrefixOf` s -> do
                 let variableStr = concat $ oversimplify l
                 let variableReference = getBracedReference variableStr
@@ -4178,22 +4179,22 @@ checkEqualsInCommand params originalToken =
                                 && "]" `isSuffixOf` variableModifier
 
                 case () of
-                    -- $foo=bar should already have caused a parse-time SC1066
+                    -- '$foo=bar' should already have caused a parse-time SC1066
                     -- _ | not braced && isPlain ->
                     --    return ()
 
                     _ | variableStr == "" -> -- Don't try to fix ${}=foo
                         genericMsg (getId cmd)
 
-                    -- $#=42 or ${#var}=42
+                    -- '$#=42' or '${#var}=42'
                     _ | "#" `isPrefixOf` variableStr ->
                         genericMsg (getId cmd)
 
-                    -- ${0}=42
+                    -- '${0}=42'
                     _ | variableStr == "0" ->
                         assign0Msg id $ fixWith [replaceToken id params "BASH_ARGV0"]
 
-                    -- $2=2
+                    -- '$2=2'
                     _ | isPositional ->
                         positionalMsg id
 

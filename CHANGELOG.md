@@ -1,5 +1,14 @@
 ## Git
 ### Added
+
+### Fixed
+
+### Changed
+- SC2048: Warning about $\* now also applies to ${array[\*]}
+
+
+## v0.7.2 - 2021-04-19
+### Added
 - `disable` directives can now be a range, e.g. `disable=SC3000-SC4000`
 - SC1143: Warn about line continuations in comments
 - SC2259/SC2260: Warn when redirections override pipes
@@ -8,7 +17,7 @@
 - SC2264: Warn about wrapper functions that blatantly recurse
 - SC2265/SC2266: Warn when using & or | with test statements
 - SC2267: Warn when using xargs -i instead of -I
-- Optional avoid-x-comparisons: Style warning SC2268 for `[ x$var = xval ]`
+- SC2268: Warn about unnecessary x-comparisons like `[ x$var = xval ]`
 
 ### Fixed
 - SC1072/SC1073 now respond to disable annotations, though ignoring parse errors
@@ -22,7 +31,7 @@
 - POSIX/dash unsupported feature warnings now have individual SC3xxx codes
 - SC1090: A leading `$x/` or `$(x)/` is now treated as `./` when locating files
 - SC2154: Variables appearing in -z/-n tests are no longer considered unassigned
-- SC2270-SC2285: Improved warnings about misused =, e.g. `${var}=42`
+- SC2270-SC2285: Improved warnings about misused `=`, e.g. `${var}=42`
 
 
 ## v0.7.1 - 2020-04-04
