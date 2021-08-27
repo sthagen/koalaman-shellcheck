@@ -59,10 +59,28 @@ willSplit x =
     T_NormalWord _ l -> any willSplit l
     _ -> False
 
-isGlob T_Extglob {} = True
-isGlob T_Glob {} = True
-isGlob (T_NormalWord _ l) = any isGlob l
-isGlob _ = False
+isGlob t = case t of
+    T_Extglob {} -> True
+    T_Glob {} -> True
+    T_NormalWord _ l -> any isGlob l || hasSplitRange l
+    _ -> False
+  where
+    -- foo[x${var}y] gets parsed as foo,[,x,$var,y],
+    -- so check if there's such an interval
+    hasSplitRange l =
+        let afterBracket = dropWhile (not . isHalfOpenRange) l
+        in any isClosingRange afterBracket
+
+    isHalfOpenRange t =
+        case t of
+            T_Literal _ "[" -> True
+            _ -> False
+
+    isClosingRange t =
+        case t of
+            T_Literal _ str -> ']' `elem` str
+            _ -> False
+
 
 -- Is this shell word a constant?
 isConstant token =
@@ -227,6 +245,39 @@ getOpts (gnu, arbitraryLongOpts) string longopts args = process args
             [] -> process args
 
     listToArgs = map (\x -> ("", (x, x)))
+
+
+-- Generic getOpts that doesn't rely on a format string, but may also be inaccurate.
+-- This provides a best guess interpretation instead of failing when new options are added.
+--
+--    "--" is treated as end of arguments
+--    "--anything[=foo]" is treated as a long option without argument
+--    "-any" is treated as -a -n -y, with the next arg as an option to -y unless it starts with -
+--    anything else is an argument
+getGenericOpts :: [Token] -> [(String, (Token, Token))]
+getGenericOpts = process
+  where
+    process (token:rest) =
+        case getLiteralStringDef "\0" token of
+            "--" -> map (\c -> ("", (c,c))) rest
+            '-':'-':word -> (takeWhile (`notElem` "\0=") word, (token, token)) : process rest
+            '-':optString ->
+                let opts = takeWhile (/= '\0') optString
+                in
+                    case rest of
+                        next:_ | "-" `isPrefixOf` getLiteralStringDef "\0" next  ->
+                            map (\c -> ([c], (token, token))) opts ++ process rest
+                        next:remainder ->
+                            case reverse opts of
+                                last:initial ->
+                                    map (\c -> ([c], (token, token))) (reverse initial)
+                                        ++ [([last], (token, next))]
+                                        ++ process remainder
+                                [] -> process remainder
+                        [] -> map (\c -> ([c], (token, token))) opts
+            _ -> ("", (token, token)) : process rest
+    process [] = []
+
 
 -- Is this an expansion of multiple items of an array?
 isArrayExpansion (T_DollarBraced _ _ l) =

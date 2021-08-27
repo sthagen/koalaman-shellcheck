@@ -1,4 +1,5 @@
-[![Build Status](https://travis-ci.org/koalaman/shellcheck.svg?branch=master)](https://travis-ci.org/koalaman/shellcheck)
+[![Build Status](https://github.com/koalaman/shellcheck/actions/workflows/build.yml/badge.svg)](https://github.com/koalaman/shellcheck/actions/workflows/build.yml)
+
 
 # ShellCheck - A shell script static analysis tool
 
@@ -112,10 +113,6 @@ Services and platforms that have ShellCheck pre-installed and ready to use:
 * [CircleCI](https://circleci.com) via the [ShellCheck Orb](https://circleci.com/orbs/registry/orb/circleci/shellcheck)
 * [Github](https://github.com/features/actions) (only Linux)
 
-Services and platforms with third party plugins:
-
-* [SonarQube](https://www.sonarqube.org/) through [sonar-shellcheck-plugin](https://github.com/emerald-squad/sonar-shellcheck-plugin)
-
 Most other services, including [GitLab](https://about.gitlab.com/), let you install
 ShellCheck yourself, either through the system's package manager (see [Installing](#installing)),
 or by downloading and unpacking a [binary release](#installing-a-pre-compiled-binary).
@@ -143,7 +140,7 @@ On systems with Stack (installs to `~/.local/bin`):
 
 On Debian based distros:
 
-    apt-get install shellcheck
+    sudo apt install shellcheck
 
 On Arch Linux based distros:
 
@@ -157,8 +154,8 @@ On Gentoo based distros:
 
 On EPEL based distros:
 
-    yum -y install epel-release
-    yum install ShellCheck
+    sudo yum -y install epel-release
+    sudo yum install ShellCheck
 
 On Fedora based distros:
 

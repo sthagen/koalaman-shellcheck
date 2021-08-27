@@ -142,7 +142,7 @@ producesComments c s = do
         prRoot pr
         let spec = defaultSpec pr
         let params = makeParameters spec
-        return . not . null $ runChecker params c
+        return . not . null $ filterByAnnotation spec params $ runChecker params c
 
 makeComment :: Severity -> Id -> Code -> String -> TokenComment
 makeComment severity id code note =
@@ -167,6 +167,8 @@ errWithFix :: MonadWriter [TokenComment] m => Id -> Code -> String -> Fix -> m (
 errWithFix  = addCommentWithFix ErrorC
 warnWithFix :: MonadWriter [TokenComment] m => Id -> Code -> String -> Fix -> m ()
 warnWithFix  = addCommentWithFix WarningC
+infoWithFix :: MonadWriter [TokenComment] m => Id -> Code -> String -> Fix -> m ()
+infoWithFix = addCommentWithFix InfoC
 styleWithFix :: MonadWriter [TokenComment] m => Id -> Code -> String -> Fix -> m ()
 styleWithFix = addCommentWithFix StyleC
 
@@ -178,7 +180,8 @@ makeCommentWithFix :: Severity -> Id -> Code -> String -> Fix -> TokenComment
 makeCommentWithFix severity id code str fix =
     let comment = makeComment severity id code str
         withFix = comment {
-            tcFix = Just fix
+            -- If fix is empty, pretend it wasn't there.
+            tcFix = if null (fixReplacements fix) then Nothing else Just fix
         }
     in force withFix
 
@@ -287,14 +290,14 @@ isStrictlyQuoteFree = isQuoteFreeNode True
 isQuoteFree = isQuoteFreeNode False
 
 
-isQuoteFreeNode strict tree t =
+isQuoteFreeNode strict shell tree t =
     isQuoteFreeElement t ||
-        headOrDefault False (mapMaybe isQuoteFreeContext (drop 1 $ getPath tree t))
+        (fromMaybe False $ msum $ map isQuoteFreeContext $ drop 1 $ getPath tree t)
   where
     -- Is this node self-quoting in itself?
     isQuoteFreeElement t =
         case t of
-            T_Assignment {} -> True
+            T_Assignment {} -> assignmentIsQuoting t
             T_FdRedirect {} -> True
             _               -> False
 
@@ -306,7 +309,7 @@ isQuoteFreeNode strict tree t =
             TC_Binary _ DoubleBracket _ _ _ -> return True
             TA_Sequence {}                  -> return True
             T_Arithmetic {}                 -> return True
-            T_Assignment {}                 -> return True
+            T_Assignment {}                 -> return $ assignmentIsQuoting t
             T_Redirecting {}                -> return False
             T_DoubleQuoted _ _              -> return True
             T_DollarDoubleQuoted _ _        -> return True
@@ -317,6 +320,18 @@ isQuoteFreeNode strict tree t =
             T_ForIn {}                      -> return (not strict)
             T_SelectIn {}                   -> return (not strict)
             _                               -> Nothing
+
+    -- Check whether this assigment is self-quoting due to being a recognized
+    -- assignment passed to a Declaration Utility. This will soon be required
+    -- by POSIX: https://austingroupbugs.net/view.php?id=351
+    assignmentIsQuoting t = shellParsesParamsAsAssignments || not (isAssignmentParamToCommand t)
+    shellParsesParamsAsAssignments = shell /= Sh
+
+    -- Is this assignment a parameter to a command like export/typeset/etc?
+    isAssignmentParamToCommand (T_Assignment id _ _ _ _) =
+        case Map.lookup id tree of
+            Just (T_SimpleCommand _ _ (_:args)) -> id `elem` (map getId args)
+            _ -> False
 
 -- Check if a token is a parameter to a certain command by name:
 -- Example: isParamTo (parentMap params) "sed" t
@@ -482,14 +497,8 @@ getModifiedVariables t =
 
         -- Count [[ -v foo ]] as an "assignment".
         -- This is to prevent [ -v foo ] being unassigned or unused.
-        TC_Unary id _ "-v" token -> do
-            str <- fmap (takeWhile (/= '[')) $ -- Quoted index
-                    flip getLiteralStringExt token $ \x ->
-                case x of
-                    T_Glob _ s -> return s -- Unquoted index
-                    _          -> []
-
-            guard . not . null $ str
+        TC_Unary id _ "-v" token -> maybeToList $ do
+            str <- getVariableForTestDashV token
             return (t, token, str, DataString SourceChecked)
 
         TC_Unary _ _ "-n" token -> markAsChecked t token
@@ -602,6 +611,7 @@ getModifiedVariableCommand base@(T_SimpleCommand id cmdPrefix (T_NormalWord _ (T
             return (base, base, "@", DataString $ SourceFrom params)
 
         "printf" -> maybeToList $ getPrintfVariable rest
+        "wait" ->   maybeToList $ getWaitVariable rest
 
         "mapfile" -> maybeToList $ getMapfileArray base rest
         "readarray" -> maybeToList $ getMapfileArray base rest
@@ -659,15 +669,15 @@ getModifiedVariableCommand base@(T_SimpleCommand id cmdPrefix (T_NormalWord _ (T
                 _            -> return (t:fromMaybe [] (getSetParams rest))
     getSetParams [] = Nothing
 
-    getPrintfVariable list = f $ map (\x -> (x, getLiteralString x)) list
-      where
-        f ((_, Just "-v") : (t, Just var) : _) = return (base, t, varName, varType $ SourceFrom list)
-            where
-                (varName, varType) = case elemIndex '[' var of
-                    Just i -> (take i var, DataArray)
-                    Nothing -> (var, DataString)
-        f (_:rest) = f rest
-        f [] = fail "not found"
+    getPrintfVariable list = getFlagAssignedVariable "v" (SourceFrom list) $ getBsdOpts "v:" list
+    getWaitVariable   list = getFlagAssignedVariable "p" SourceInteger     $ return $ getGenericOpts list
+
+    getFlagAssignedVariable str dataSource maybeFlags = do
+        flags <- maybeFlags
+        (_, (flag, value)) <- find ((== str) . fst) flags
+        variableName <- getLiteralStringExt (const $ return "!") value
+        let (baseName, index) = span (/= '[') variableName
+        return (base, value, baseName, (if null index then DataString else DataArray) dataSource)
 
     -- mapfile has some curious syntax allowing flags plus 0..n variable names
     -- where only the first non-option one is used if any.
@@ -708,6 +718,20 @@ getIndexReferences s = fromMaybe [] $ do
   where
     re = mkRegex "(\\[.*\\])"
 
+-- Given a NormalWord like foo or foo[$bar], get foo.
+-- Primarily used to get references for [[ -v foo[bar] ]]
+getVariableForTestDashV :: Token -> Maybe String
+getVariableForTestDashV t = do
+    str <- takeWhile ('[' /=) <$> getLiteralStringExt toStr t
+    guard $ isVariableName str
+    return str
+  where
+    -- foo[bar] gets parsed with [bar] as a glob, so undo that
+    toStr (T_Glob _ s) = return s
+    -- Turn foo[$x] into foo[\0] so that we can get the constant array name
+    -- in a non-constant expression (while filtering out foo$x[$y])
+    toStr _ = return "\0"
+
 prop_getOffsetReferences1 = getOffsetReferences ":bar" == ["bar"]
 prop_getOffsetReferences2 = getOffsetReferences ":bar:baz" == ["bar", "baz"]
 prop_getOffsetReferences3 = getOffsetReferences "[foo]:bar" == ["bar"]
@@ -737,7 +761,7 @@ getReferencedVariables parents t =
         TC_Unary id _ "-v" token -> getIfReference t token
         TC_Unary id _ "-R" token -> getIfReference t token
         TC_Binary id DoubleBracket op lhs rhs ->
-            if isDereferencing op
+            if isDereferencingBinaryOp op
             then concatMap (getIfReference t) [lhs, rhs]
             else []
 
@@ -766,16 +790,15 @@ getReferencedVariables parents t =
         T_Glob _ s -> return s    -- Also when parsed as globs
         _          -> []
 
-    getIfReference context token = do
-            str@(h:_) <- getLiteralStringExt literalizer token
-            when (isDigit h) $ fail "is a number"
+    getIfReference context token = maybeToList $ do
+            str <- getVariableForTestDashV token
             return (context, token, getBracedReference str)
-
-    isDereferencing = (`elem` ["-eq", "-ne", "-lt", "-le", "-gt", "-ge"])
 
     isArithmeticAssignment t = case getPath parents t of
         this: TA_Assignment _ "=" lhs _ :_ -> lhs == t
         _                                  -> False
+
+isDereferencingBinaryOp = (`elem` ["-eq", "-ne", "-lt", "-le", "-gt", "-ge"])
 
 dataTypeFrom defaultType v = (case v of T_Array {} -> DataArray; _ -> defaultType) $ SourceFrom [v]
 
@@ -801,6 +824,7 @@ isConfusedGlobRegex _       = False
 
 isVariableStartChar x = x == '_' || isAsciiLower x || isAsciiUpper x
 isVariableChar x = isVariableStartChar x || isDigit x
+isSpecialVariableChar = (`elem` "*@#?-$!")
 variableNameRegex = mkRegex "[_a-zA-Z][_a-zA-Z0-9]*"
 
 prop_isVariableName1 = isVariableName "_fo123"
@@ -846,7 +870,7 @@ getBracedReference s = fromMaybe s $
         let name = takeWhile isVariableChar s
         guard . not $ null name
         return name
-    getSpecial (c:_) | c `elem` "*@#?-$!" = return [c]
+    getSpecial (c:_) | isSpecialVariableChar c = return [c]
     getSpecial _ = fail "empty or not special"
 
     nameExpansion ('!':next:rest) = do -- e.g. ${!foo*bar*}
@@ -859,6 +883,8 @@ getBracedReference s = fromMaybe s $
 prop_getBracedModifier1 = getBracedModifier "foo:bar:baz" == ":bar:baz"
 prop_getBracedModifier2 = getBracedModifier "!var:-foo" == ":-foo"
 prop_getBracedModifier3 = getBracedModifier "foo[bar]" == "[bar]"
+prop_getBracedModifier4 = getBracedModifier "foo[@]@Q" == "[@]@Q"
+prop_getBracedModifier5 = getBracedModifier "@@Q" == "@Q"
 getBracedModifier s = headOrDefault "" $ do
     let var = getBracedReference s
     a <- dropModifier s
@@ -937,6 +963,18 @@ isBashLike params =
         Ksh -> True
         Dash -> False
         Sh -> False
+
+-- Returns whether a token is a parameter expansion without any modifiers.
+-- True for $var ${var} $1 $#
+-- False for ${#var} ${var[x]} ${var:-0}
+isUnmodifiedParameterExpansion t =
+    case t of
+        T_DollarBraced _ False _ -> True
+        T_DollarBraced _ _ list ->
+            let str = concat $ oversimplify list
+            in getBracedReference str == str
+        _ -> False
+
 
 return []
 runTests =  $( [| $(forAllProperties) (quickCheckWithResult (stdArgs { maxSuccess = 1 }) ) |])

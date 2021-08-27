@@ -2,11 +2,28 @@
 ### Added
 - SC2286-SC2288: Warn when command name ends in a symbol like `/.)'"`
 - SC2289: Warn when command name contains tabs or linefeeds
+- SC2291: Warn about repeated unquoted spaces between words in echo
+- SC2292: Suggest [[ over [ in Bash/Ksh scripts (optional)
+- SC2293/SC2294: Warn when calling `eval` with arrays
+- SC2295: Warn about "${x#$y}" treating $y as a pattern when not quoted
+- SC2296-SC2301: Improved warnings for bad parameter expansions
+- SC2302/SC2303: Warn about loops over array values when using them as keys
+- SC2304-SC2306: Warn about unquoted globs in expr arguments
+- SC2307: Warn about insufficient number of arguments to expr
+- SC2308: Suggest other approaches for non-standard expr extensions
 
 ### Fixed
+- SC2102 about repetitions in ranges no longer triggers on [[ -v arr[xx] ]]
+- SC2155 now recognizes `typeset` and local read-only `declare` statements
+- SC2181 now tries to avoid triggering for error handling functions
+- SC2290: Warn about misused = in declare & co, which were not caught by SC2270+
+- The flag --color=auto no longer outputs color when TERM is "dumb" or unset
 
 ### Changed
 - SC2048: Warning about $\* now also applies to ${array[\*]}
+- SC2181 now only triggers on single condition tests like `[ $? = 0 ]`.
+- Quote warnings are now emitted for declaration utilities in sh
+- Leading `_` can now be used to suppress warnings about unused variables
 
 
 ## v0.7.2 - 2021-04-19
@@ -206,7 +223,7 @@
 - SC2185: Suggest explicitly adding path for `find`
 - SC2184: Warn about unsetting globs (e.g. `unset foo[1]`)
 - SC2183: Warn about `printf` with more formatters than variables
-- SC2182: Warn about ignored arguments with `printf` 
+- SC2182: Warn about ignored arguments with `printf`
 - SC2181: Suggest using command directly instead of `if [ $? -eq 0 ]`
 - SC1106: Warn when using `test` operators in `(( 1 -eq 2 ))`
 
@@ -377,7 +394,7 @@
 ### Added
 - SC2121: Warn about trying to `set` variables, e.g. `set var = value`
 - SC2120/SC2119: Warn when a function uses `$1..` if none are ever passed
-- SC2117: Warn when using `su` in interactive mode, e.g. `su foo; whoami` 
+- SC2117: Warn when using `su` in interactive mode, e.g. `su foo; whoami`
 - SC2116: Detect useless use of echo, e.g. `for i in $(echo $var)`
 - SC2115/SC2114: Detect some catastrophic `rm -r "$empty/"` mistakes
 - SC1081: Warn when capitalizing keywords like `While`
@@ -428,7 +445,7 @@
 
 ### Removed
 - Suggestions about using parameter expansion over basename
-- The `jsoncheck` binary. Use `shellcheck -f json` instead. 
+- The `jsoncheck` binary. Use `shellcheck -f json` instead.
 
 
 ## v0.2.0 - 2013-10-27

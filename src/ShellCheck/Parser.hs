@@ -1372,6 +1372,8 @@ prop_readGlob5 = isOk readGlob "[^[:alpha:]1-9]"
 prop_readGlob6 = isOk readGlob "[\\|]"
 prop_readGlob7 = isOk readGlob "[^[]"
 prop_readGlob8 = isOk readGlob "[*?]"
+prop_readGlob9 = isOk readGlob "[!]^]"
+prop_readGlob10 = isOk readGlob "[]]"
 readGlob = readExtglob <|> readSimple <|> readClass <|> readGlobbyLiteral
     where
         readSimple = do
@@ -1379,22 +1381,25 @@ readGlob = readExtglob <|> readSimple <|> readClass <|> readGlobbyLiteral
             c <- oneOf "*?"
             id <- endSpan start
             return $ T_Glob id [c]
-        -- Doesn't handle weird things like [^]a] and [$foo]. fixme?
         readClass = try $ do
             start <- startSpan
             char '['
-            s <- many1 (predefined <|> readNormalLiteralPart "]" <|> globchars)
+            negation <- charToString (oneOf "!^") <|> return ""
+            leadingBracket <- charToString (oneOf "]") <|> return ""
+            s <- many (predefined <|> readNormalLiteralPart "]" <|> globchars)
+            guard $ not (null leadingBracket) || not (null s)
             char ']'
             id <- endSpan start
-            return $ T_Glob id $ "[" ++ concat s ++ "]"
+            return $ T_Glob id $ "[" ++ concat (negation:leadingBracket:s) ++ "]"
           where
-           globchars = fmap return . oneOf $ "!$[" ++ extglobStartChars
+           globchars = charToString $ oneOf $ "![" ++ extglobStartChars
            predefined = do
               try $ string "[:"
               s <- many1 letter
               string ":]"
               return $ "[:" ++ s ++ ":]"
 
+        charToString = fmap return
         readGlobbyLiteral = do
             start <- startSpan
             c <- extglobStart <|> char '['
@@ -1996,12 +2001,14 @@ readHereString = called "here string" $ do
     word <- readNormalWord
     return $ T_HereString id word
 
+prop_readNewlineList1 = isOk readScript "&> /dev/null echo foo"
 readNewlineList =
     many1 ((linefeed <|> carriageReturn) `thenSkip` spacing) <* checkBadBreak
   where
     checkBadBreak = optional $ do
                 pos <- getPosition
                 try $ lookAhead (oneOf "|&") --  See if the next thing could be |, || or &&
+                notFollowedBy2 (string "&>") --  Except &> or &>> which is valid
                 parseProblemAt pos ErrorC 1133
                     "Unexpected start of line. If breaking lines, |/||/&& should be at the end of the previous one."
 readLineBreak = optional readNewlineList
@@ -2061,6 +2068,7 @@ prop_readSimpleCommand4 = isOk readSimpleCommand "typeset -a foo=(lol)"
 prop_readSimpleCommand5 = isOk readSimpleCommand "time if true; then echo foo; fi"
 prop_readSimpleCommand6 = isOk readSimpleCommand "time -p ( ls -l; )"
 prop_readSimpleCommand7 = isOk readSimpleCommand "\\ls"
+prop_readSimpleCommand7b = isOk readSimpleCommand "\\:"
 prop_readSimpleCommand8 = isWarning readSimpleCommand "// Lol"
 prop_readSimpleCommand9 = isWarning readSimpleCommand "/* Lolbert */"
 prop_readSimpleCommand10 = isWarning readSimpleCommand "/**** Lolbert */"
@@ -2321,7 +2329,7 @@ readCmdName = do
     -- Ignore alias suppression
     optional . try $ do
         char '\\'
-        lookAhead $ variableChars
+        lookAhead $ variableChars <|> oneOf ":."
     readCmdWord
 
 readCmdWord = do
@@ -2807,7 +2815,7 @@ readLetSuffix = many1 (readIoRedirect <|> try readLetExpression <|> readCmdWord)
         startPos <- getPosition
         expression <- readStringForParser readCmdWord
         let (unQuoted, newPos) = kludgeAwayQuotes expression startPos
-        subParse newPos readArithmeticContents unQuoted
+        subParse newPos (readArithmeticContents <* eof) unQuoted
 
     kludgeAwayQuotes :: String -> SourcePos -> (String, SourcePos)
     kludgeAwayQuotes s p =

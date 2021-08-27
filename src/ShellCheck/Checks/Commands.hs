@@ -57,7 +57,7 @@ commandChecks :: [CommandCheck]
 commandChecks = [
     checkTr
     ,checkFindNameGlob
-    ,checkNeedlessExpr
+    ,checkExpr
     ,checkGrepRe
     ,checkTrapQuotes
     ,checkReturn
@@ -95,7 +95,14 @@ commandChecks = [
     ,checkSourceArgs
     ,checkChmodDashr
     ,checkXargsDashi
+    ,checkUnquotedEchoSpaces
+    ,checkEvalArray
     ]
+    ++ map checkArgComparison declaringCommands
+    ++ map checkMaskedReturns declaringCommands
+
+declaringCommands = ["local", "declare", "export", "readonly", "typeset", "let"]
+
 
 optionalChecks = map fst optionalCommandChecks
 optionalCommandChecks :: [(CheckDescription, CommandCheck)]
@@ -131,17 +138,29 @@ prop_checkGetOptsS3 = checkGetOpts "-f -x" ["f", "x"] [] $ getOpts (True, True) 
 prop_checkGetOptsS4 = checkGetOpts "-f -x" ["f"] [] $ getOpts (True, True) "f:" []
 prop_checkGetOptsS5 = checkGetOpts "-fx" [] [] $ getOpts (True, True) "fx:" []
 
+prop_checkGenericOptsS1 = checkGetOpts "-f x" ["f"] [] $ return . getGenericOpts
+prop_checkGenericOptsS2 = checkGetOpts "-abc x" ["a", "b", "c"] [] $ return . getGenericOpts
+prop_checkGenericOptsS3 = checkGetOpts "-abc -x" ["a", "b", "c", "x"] [] $ return . getGenericOpts
+prop_checkGenericOptsS4 = checkGetOpts "-x" ["x"] [] $ return . getGenericOpts
+
 -- Long options
 prop_checkGetOptsL1 = checkGetOpts "--foo=bar baz" ["foo"] ["baz"] $ getOpts (True, False) "" [("foo", True)]
 prop_checkGetOptsL2 = checkGetOpts "--foo bar baz" ["foo"] ["baz"] $ getOpts (True, False) "" [("foo", True)]
 prop_checkGetOptsL3 = checkGetOpts "--foo baz" ["foo"] ["baz"] $ getOpts (True, True) "" []
 prop_checkGetOptsL4 = checkGetOpts "--foo baz" [] [] $ getOpts (True, False) "" []
 
+prop_checkGenericOptsL1 = checkGetOpts "--foo=bar" ["foo"] [] $ return . getGenericOpts
+prop_checkGenericOptsL2 = checkGetOpts "--foo bar" ["foo"] ["bar"] $ return . getGenericOpts
+prop_checkGenericOptsL3 = checkGetOpts "-x --foo" ["x", "foo"] [] $ return . getGenericOpts
+
 -- Know when to terminate
 prop_checkGetOptsT1 = checkGetOpts "-a x -b" ["a", "b"] ["x"] $ getOpts (True, True) "ab" []
 prop_checkGetOptsT2 = checkGetOpts "-a x -b" ["a"] ["x","-b"] $ getOpts (False, True) "ab" []
 prop_checkGetOptsT3 = checkGetOpts "-a -- -b" ["a"] ["-b"] $ getOpts (True, True) "ab" []
 prop_checkGetOptsT4 = checkGetOpts "-a -- -b" ["a", "b"] [] $ getOpts (True, True) "a:b" []
+
+prop_checkGenericOptsT1 = checkGetOpts "-x -- -y" ["x"] ["-y"] $ return . getGenericOpts
+prop_checkGenericOptsT2 = checkGetOpts "-xy --" ["x", "y"] [] $ return . getGenericOpts
 
 
 buildCommandMap :: [CommandCheck] -> Map.Map CommandName (Token -> Analysis)
@@ -235,18 +254,73 @@ checkFindNameGlob = CommandCheck (Basename "find") (f . arguments)  where
         acc b
 
 
-prop_checkNeedlessExpr = verify checkNeedlessExpr "foo=$(expr 3 + 2)"
-prop_checkNeedlessExpr2 = verify checkNeedlessExpr "foo=`echo \\`expr 3 + 2\\``"
-prop_checkNeedlessExpr3 = verifyNot checkNeedlessExpr "foo=$(expr foo : regex)"
-prop_checkNeedlessExpr4 = verifyNot checkNeedlessExpr "foo=$(expr foo \\< regex)"
-checkNeedlessExpr = CommandCheck (Basename "expr") f where
-    f t =
+prop_checkExpr = verify checkExpr "foo=$(expr 3 + 2)"
+prop_checkExpr2 = verify checkExpr "foo=`echo \\`expr 3 + 2\\``"
+prop_checkExpr3 = verifyNot checkExpr "foo=$(expr foo : regex)"
+prop_checkExpr4 = verifyNot checkExpr "foo=$(expr foo \\< regex)"
+prop_checkExpr5 = verify checkExpr "# shellcheck disable=SC2003\nexpr match foo bar"
+prop_checkExpr6 = verify checkExpr "# shellcheck disable=SC2003\nexpr foo : fo*"
+prop_checkExpr7 = verify checkExpr "# shellcheck disable=SC2003\nexpr 5 -3"
+prop_checkExpr8 = verifyNot checkExpr "# shellcheck disable=SC2003\nexpr \"$@\""
+prop_checkExpr9 = verifyNot checkExpr "# shellcheck disable=SC2003\nexpr 5 $rest"
+prop_checkExpr10 = verify checkExpr "# shellcheck disable=SC2003\nexpr length \"$var\""
+prop_checkExpr11 = verify checkExpr "# shellcheck disable=SC2003\nexpr foo > bar"
+prop_checkExpr12 = verify checkExpr "# shellcheck disable=SC2003\nexpr 1 | 2"
+prop_checkExpr13 = verify checkExpr "# shellcheck disable=SC2003\nexpr 1 * 2"
+prop_checkExpr14 = verify checkExpr "# shellcheck disable=SC2003\nexpr \"$x\" >=  \"$y\""
+
+checkExpr = CommandCheck (Basename "expr") f where
+    f t = do
         when (all (`notElem` exceptions) (words $ arguments t)) $
             style (getId $ getCommandTokenOrThis t) 2003
                 "expr is antiquated. Consider rewriting this using $((..)), ${} or [[ ]]."
+
+        case arguments t of
+            [lhs, op, rhs] -> do
+                checkOp lhs
+                case getWordParts op of
+                    [T_Glob _ "*"] ->
+                        err (getId op) 2304
+                            "* must be escaped to multiply: \\*. Modern $((x * y)) avoids this issue."
+                    [T_Literal _ ":"] | isGlob rhs ->
+                        warn (getId rhs) 2305
+                            "Quote regex argument to expr to avoid it expanding as a glob."
+                    _ -> return ()
+
+            [single] | not (willSplit single) ->
+                warn (getId single) 2307
+                    "'expr' expects 3+ arguments but sees 1. Make sure each operator/operand is a separate argument, and escape <>&|."
+
+            [first, second] |
+                (fromMaybe "" $ getLiteralString first) /= "length"
+                  && not (willSplit first || willSplit second) -> do
+                    checkOp first
+                    warn (getId t) 2307
+                        "'expr' expects 3+ arguments, but sees 2. Make sure each operator/operand is a separate argument, and escape <>&|."
+
+            (first:rest) -> do
+                checkOp first
+                forM_ rest $ \t ->
+                    -- We already find 95%+ of multiplication and regex earlier, so don't bother classifying this further.
+                    when (isGlob t) $ warn (getId t) 2306 "Escape glob characters in arguments to expr to avoid pathname expansion."
+
+            _ -> return ()
+
     -- These operators are hard to replicate in POSIX
-    exceptions = [ ":", "<", ">", "<=", ">=" ]
+    exceptions = [ ":", "<", ">", "<=", ">=",
+        -- We can offer better suggestions for these
+        "match", "length", "substr", "index"]
     words = mapMaybe getLiteralString
+
+    checkOp side =
+        case getLiteralString side of
+            Just "match" -> msg "'expr match' has unspecified results. Prefer 'expr str : regex'."
+            Just "length" -> msg "'expr length' has unspecified results. Prefer ${#var}."
+            Just "substr" -> msg "'expr substr' has unspecified results. Prefer 'cut' or ${var#???}."
+            Just "index" -> msg "'expr index' has unspecified results. Prefer x=${var%%[chars]*}; $((${#x}+1))."
+            _ -> return ()
+      where
+        msg = info (getId side) 2308
 
 
 prop_checkGrepRe1 = verify checkGrepRe "cat foo | grep *.mp3"
@@ -771,6 +845,9 @@ checkAliasesExpandEarly = CommandCheck (Exactly "alias") (f . arguments)
 
 prop_checkUnsetGlobs1 = verify checkUnsetGlobs "unset foo[1]"
 prop_checkUnsetGlobs2 = verifyNot checkUnsetGlobs "unset foo"
+prop_checkUnsetGlobs3 = verify checkUnsetGlobs "unset foo[$i]"
+prop_checkUnsetGlobs4 = verify checkUnsetGlobs "unset foo[x${i}y]"
+prop_checkUnsetGlobs5 = verifyNot checkUnsetGlobs "unset foo]["
 checkUnsetGlobs = CommandCheck (Exactly "unset") (mapM_ check . arguments)
   where
     check arg =
@@ -1142,6 +1219,146 @@ checkXargsDashi = CommandCheck (Basename "xargs") f
         (option, value) <- lookup "i" opts
         return $ info (getId option) 2267 "GNU xargs -i is deprecated in favor of -I{}"
     parseOpts = getBsdOpts "0oprtxadR:S:J:L:l:n:P:s:e:E:i:I:"
+
+
+prop_checkArgComparison1 = verify (checkArgComparison "declare") "declare a = b"
+prop_checkArgComparison2 = verify (checkArgComparison "declare") "declare a =b"
+prop_checkArgComparison3 = verifyNot (checkArgComparison "declare") "declare a=b"
+prop_checkArgComparison4 = verify (checkArgComparison "export") "export a +=b"
+prop_checkArgComparison7 = verifyNot (checkArgComparison "declare") "declare -a +i foo"
+prop_checkArgComparison8 = verify (checkArgComparison "let") "let x = 0"
+-- This mirrors checkSecondArgIsComparison but for arguments to local/readonly/declare/export
+checkArgComparison cmd = CommandCheck (Exactly cmd) wordsWithEqual
+  where
+    wordsWithEqual t = mapM_ check $ arguments t
+    check arg = do
+      sequence_ $ do
+        str <- getLeadingUnquotedString arg
+        case str of
+            '=':_ ->
+                return $ err (headId arg) 2290 $
+                    "Remove spaces around = to assign."
+            '+':'=':_ ->
+                return $ err (headId arg) 2290 $
+                    "Remove spaces around += to append."
+            _ -> Nothing
+
+       -- 'let' is parsed as a sequence of arithmetic expansions,
+       -- so we want the additional warning for "x="
+      when (cmd == "let") $ sequence_ $ do
+        token <- getTrailingUnquotedLiteral arg
+        str <- getLiteralString token
+        guard $ "=" `isSuffixOf` str
+        return $ err (getId token) 2290 $
+            "Remove spaces around = to assign."
+
+    headId t =
+        case t of
+            T_NormalWord _ (x:_) -> getId x
+            _ -> getId t
+
+
+prop_checkMaskedReturns1 = verify (checkMaskedReturns "local") "f() { local a=$(false); }"
+prop_checkMaskedReturns2 = verify (checkMaskedReturns "declare") "declare a=$(false)"
+prop_checkMaskedReturns3 = verify (checkMaskedReturns "declare") "declare a=\"`false`\""
+prop_checkMaskedReturns4 = verify (checkMaskedReturns "readonly") "readonly a=$(false)"
+prop_checkMaskedReturns5 = verify (checkMaskedReturns "readonly") "readonly a=\"`false`\""
+prop_checkMaskedReturns6 = verifyNot (checkMaskedReturns "declare") "declare a; a=$(false)"
+prop_checkMaskedReturns7 = verifyNot (checkMaskedReturns "local") "f() { local -r a=$(false); }"
+prop_checkMaskedReturns8 = verifyNot (checkMaskedReturns "readonly") "a=$(false); readonly a"
+prop_checkMaskedReturns9 = verify (checkMaskedReturns "typeset") "#!/bin/ksh\n f() { typeset -r x=$(false); }"
+prop_checkMaskedReturns10 = verifyNot (checkMaskedReturns "typeset") "#!/bin/ksh\n function f { typeset -r x=$(false); }"
+prop_checkMaskedReturns11 = verifyNot (checkMaskedReturns "typeset") "#!/bin/bash\n f() { typeset -r x=$(false); }"
+prop_checkMaskedReturns12 = verify (checkMaskedReturns "typeset") "typeset -r x=$(false);"
+prop_checkMaskedReturns13 = verify (checkMaskedReturns "typeset") "f() { typeset -g x=$(false); }"
+prop_checkMaskedReturns14 = verify (checkMaskedReturns "declare") "declare x=${ false; }"
+prop_checkMaskedReturns15 = verify (checkMaskedReturns "declare") "f() { declare x=$(false); }"
+checkMaskedReturns str = CommandCheck (Exactly str) checkCmd
+  where
+    checkCmd t = do
+        path <- getPathM t
+        shell <- asks shellType
+        sequence_ $ do
+            name <- getCommandName t
+
+            let flags = map snd (getAllFlags t)
+            let hasDashR =  "r" `elem` flags
+            let hasDashG =  "g" `elem` flags
+            let isInScopedFunction = any (isScopedFunction shell) path
+
+            let isLocal = not hasDashG && isLocalInFunction name && isInScopedFunction
+            let isReadOnly = name == "readonly" || hasDashR
+
+            -- Don't warn about local variables that are declared readonly,
+            -- because the workaround `local x; x=$(false); local -r x;` is annoying
+            guard . not $ isLocal && isReadOnly
+
+            return $ mapM_ checkArgs $ arguments t
+
+    checkArgs (T_Assignment id _ _ _ word) | any hasReturn $ getWordParts word =
+        warn id 2155 "Declare and assign separately to avoid masking return values."
+    checkArgs _ = return ()
+
+    isLocalInFunction = (`elem` ["local", "declare", "typeset"])
+    isScopedFunction shell t =
+        case t of
+            T_BatsTest {} -> True
+            -- In ksh, only functions declared with 'function' have their own scope
+            T_Function _ (FunctionKeyword hasFunction) _ _ _ -> shell /= Ksh || hasFunction
+            _ -> False
+
+    hasReturn t = case t of
+        T_Backticked {} -> True
+        T_DollarExpansion {} -> True
+        T_DollarBraceCommandExpansion {} -> True
+        _ -> False
+
+
+prop_checkUnquotedEchoSpaces1 = verify checkUnquotedEchoSpaces "echo foo         bar"
+prop_checkUnquotedEchoSpaces2 = verifyNot checkUnquotedEchoSpaces "echo       foo"
+prop_checkUnquotedEchoSpaces3 = verifyNot checkUnquotedEchoSpaces "echo foo  bar"
+prop_checkUnquotedEchoSpaces4 = verifyNot checkUnquotedEchoSpaces "echo 'foo          bar'"
+prop_checkUnquotedEchoSpaces5 = verifyNot checkUnquotedEchoSpaces "echo a > myfile.txt b"
+prop_checkUnquotedEchoSpaces6 = verifyNot checkUnquotedEchoSpaces "        echo foo\\\n        bar"
+checkUnquotedEchoSpaces = CommandCheck (Basename "echo") check
+  where
+    check t = do
+        let args = arguments t
+        m <- asks tokenPositions
+        redir <- getClosestCommandM t
+        sequence_ $ do
+            let positions = mapMaybe (\c -> Map.lookup (getId c) m) args
+            let pairs = zip positions (drop 1 positions)
+            (T_Redirecting _ redirTokens _) <- redir
+            let redirPositions = mapMaybe (\c -> fst <$> Map.lookup (getId c) m) redirTokens
+            guard $ any (hasSpacesBetween redirPositions) pairs
+            return $ info (getId t) 2291 "Quote repeated spaces to avoid them collapsing into one."
+
+    hasSpacesBetween redirs ((a,b), (c,d)) =
+        posLine a == posLine d
+        && ((posColumn c) - (posColumn b)) >= 4
+        && not (any (\x -> b < x && x < c) redirs)
+
+
+prop_checkEvalArray1 = verify checkEvalArray  "eval $@"
+prop_checkEvalArray2 = verify checkEvalArray  "eval \"${args[@]}\""
+prop_checkEvalArray3 = verify checkEvalArray  "eval \"${args[@]@Q}\""
+prop_checkEvalArray4 = verifyNot checkEvalArray  "eval \"${args[*]@Q}\""
+prop_checkEvalArray5 = verifyNot checkEvalArray  "eval \"$*\""
+checkEvalArray = CommandCheck (Exactly "eval") (mapM_ check . concatMap getWordParts . arguments)
+  where
+    check t =
+        when (isArrayExpansion t) $
+            if isEscaped t
+            then style (getId t) 2293 "When eval'ing @Q-quoted words, use * rather than @ as the index."
+            else warn (getId t) 2294 "eval negates the benefit of arrays. Drop eval to preserve whitespace/symbols (or eval as string)."
+
+    isEscaped q =
+        case q of
+            -- Match ${arr[@]@Q} and ${@@Q} and such
+            T_DollarBraced _ _ l -> 'Q' `elem` getBracedModifier (concat $ oversimplify l)
+            _ -> False
+
 
 return []
 runTests =  $( [| $(forAllProperties) (quickCheckWithResult (stdArgs { maxSuccess = 1 }) ) |])
