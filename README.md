@@ -239,6 +239,19 @@ pandoc -s -f markdown-smart -t man shellcheck.1.md -o shellcheck.1
 sudo mv shellcheck.1 /usr/share/man/man1
 ```
 
+### pre-commit
+
+To run ShellCheck via [pre-commit](https://pre-commit.com/), add the hook to your `.pre-commit-config.yaml`:
+
+```
+repos:
+-   repo: https://github.com/koalaman/shellcheck-precommit
+    rev: v0.7.2
+    hooks:
+    -   id: shellcheck
+#       args: ["--severity=warning"]  # Optionally only show errors and warnings
+```
+
 ### Travis CI
 
 Travis CI has now integrated ShellCheck by default, so you don't need to manually install it.

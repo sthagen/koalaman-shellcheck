@@ -253,6 +253,13 @@ optionalTreeChecks = [
         cdPositive = "[ -e /etc/issue ]",
         cdNegative = "[[ -e /etc/issue ]]"
     }, checkRequireDoubleBracket)
+
+    ,(newCheckDescription {
+        cdName = "check-set-e-suppressed",
+        cdDescription = "Notify when set -e is suppressed during function invocation",
+        cdPositive = "set -e; func() { cp *.txt ~/backup; rm *.txt; }; func && echo ok",
+        cdNegative = "set -e; func() { cp *.txt ~/backup; rm *.txt; }; func; echo ok"
+    }, checkSetESuppressed)
     ]
 
 optionalCheckMap :: Map.Map String (Parameters -> Token -> [TokenComment])
@@ -392,6 +399,24 @@ replaceToken id params r =
 
 surroundWith id params s = fixWith [replaceStart id params 0 s, replaceEnd id params 0 s]
 fixWith fixes = newFix { fixReplacements = fixes }
+
+analyse f t = execState (doAnalysis f t) []
+
+-- Make a map from functions to definition IDs
+functions t = Map.fromList $ analyse findFunctions t
+findFunctions (T_Function id _ _ name _)
+    = modify ((name, id):)
+findFunctions _ = return ()
+
+-- Make a map from aliases to definition IDs
+aliases t = Map.fromList $ analyse findAliases t
+findAliases t@(T_SimpleCommand _ _ (_:args))
+    | t `isUnqualifiedCommand` "alias" = mapM_ getAlias args
+findAliases _ = return ()
+getAlias arg =
+    let string = onlyLiteralString arg
+    in when ('=' `elem` string) $
+        modify ((takeWhile (/= '=') string, getId arg):)
 
 prop_checkEchoWc3 = verify checkEchoWc "n=$(echo $foo | wc -c)"
 checkEchoWc _ (T_Pipeline id _ [a, b]) =
@@ -1109,6 +1134,12 @@ prop_checkNumberComparisons13 = verify checkNumberComparisons "[ $foo > $bar ]"
 prop_checkNumberComparisons14 = verifyNot checkNumberComparisons "[[ foo < bar ]]"
 prop_checkNumberComparisons15 = verifyNot checkNumberComparisons "[ $foo '>' $bar ]"
 prop_checkNumberComparisons16 = verify checkNumberComparisons "[ foo -eq 'y' ]"
+prop_checkNumberComparisons17 = verify checkNumberComparisons "[[ 'foo' -eq 2 ]]"
+prop_checkNumberComparisons18 = verify checkNumberComparisons "[[ foo -eq 2 ]]"
+prop_checkNumberComparisons19 = verifyNot checkNumberComparisons "foo=1; [[ foo -eq 2 ]]"
+prop_checkNumberComparisons20 = verify checkNumberComparisons "[[ 2 -eq / ]]"
+prop_checkNumberComparisons21 = verify checkNumberComparisons "[[ foo -eq foo ]]"
+
 checkNumberComparisons params (TC_Binary id typ op lhs rhs) = do
     if isNum lhs || isNum rhs
       then do
@@ -1134,8 +1165,8 @@ checkNumberComparisons params (TC_Binary id typ op lhs rhs) = do
 
     when (op `elem` arithmeticBinaryTestOps) $ do
         mapM_ checkDecimals [lhs, rhs]
-        when (typ == SingleBracket) $
-            checkStrings [lhs, rhs]
+        mapM_ checkString [lhs, rhs]
+
 
   where
       hasStringComparison = shellType params /= Sh
@@ -1148,19 +1179,45 @@ checkNumberComparisons params (TC_Binary id typ op lhs rhs) = do
       decimalError = "Decimals are not supported. " ++
         "Either use integers only, or use bc or awk to compare."
 
-      checkStrings =
-        mapM_ stringError . find isNonNum
+      checkString t =
+        let
+            asString = getLiteralStringDef "\0" t
+            isVar = isVariableName asString
+            kind = if isVar then "a variable" else "an arithmetic expression"
+            fix = if isVar then "$var" else "$((expr))"
+        in
+            when (isNonNum t) $
+                if typ == SingleBracket
+                then
+                    err (getId t) 2170 $
+                        "Invalid number for " ++ op ++ ". Use " ++ seqv op ++
+                        " to compare as string (or use " ++ fix ++
+                        " to expand as " ++ kind ++ ")."
+                else
+                    -- We should warn if any of the following holds:
+                    --   The string is not a variable name
+                    --   Any part of it is quoted
+                    --   It's not a recognized variable name
+                    when (not isVar || any isQuotes (getWordParts t) || asString `notElem` assignedVariables) $
+                        warn (getId t) 2309 $
+                            op ++ " treats this as " ++ kind ++ ". " ++
+                            "Use " ++ seqv op ++ " to compare as string (or expand explicitly with " ++ fix ++ ")."
+
+      assignedVariables :: [String]
+      assignedVariables = mapMaybe f (variableFlow params)
+        where
+            f t = do
+                Assignment (_, _, name, _) <- return t
+                return name
 
       isNonNum t = not . all numChar $ onlyLiteralString t
       numChar x = isDigit x || x `elem` "+-. "
-
-      stringError t = err (getId t) 2170 $
-          "Numerical " ++ op ++ " does not dereference in [..]. Expand or use string operator."
 
       isNum t =
         case oversimplify t of
             [v] -> all isDigit v
             _ -> False
+
       isFraction t =
         case oversimplify t of
             [v] -> isJust $ matchRegex floatRegex v
@@ -2240,21 +2297,11 @@ checkFunctionsUsedExternally params t =
         findExecFlags = ["-exec", "-execdir", "-ok"]
         dropFlags = dropWhile (\x -> "-" `isPrefixOf` fst x)
 
-    -- Make a map from functions/aliases to definition IDs
-    analyse f t = execState (doAnalysis f t) []
-    functions = Map.fromList $ analyse findFunctions t
-    findFunctions (T_Function id _ _ name _) = modify ((name, id):)
-    findFunctions t@(T_SimpleCommand id _ (_:args))
-        | t `isUnqualifiedCommand` "alias" = mapM_ getAlias args
-    findFunctions _ = return ()
-    getAlias arg =
-        let string = onlyLiteralString arg
-        in when ('=' `elem` string) $
-            modify ((takeWhile (/= '=') string, getId arg):)
+    functionsAndAliases = Map.union (functions t) (aliases t)
 
     checkArg cmd (_, arg) = sequence_ $ do
         literalArg <- getUnquotedLiteral arg  -- only consider unquoted literals
-        definitionId <- Map.lookup literalArg functions
+        definitionId <- Map.lookup literalArg functionsAndAliases
         return $ do
             warn (getId arg) 2033
               "Shell functions can't be passed to external commands."
@@ -3742,21 +3789,27 @@ checkForLoopGlobVariables _ t =
     suggest t = info (getId t) 2231
         "Quote expansions in this for loop glob to prevent wordsplitting, e.g. \"$dir\"/*.txt ."
 
+
 prop_checkSubshelledTests1 = verify checkSubshelledTests "a && ( [ b ] || ! [ c ] )"
 prop_checkSubshelledTests2 = verify checkSubshelledTests "( [ a ] )"
 prop_checkSubshelledTests3 = verify checkSubshelledTests "( [ a ] && [ b ] || test c )"
 prop_checkSubshelledTests4 = verify checkSubshelledTests "( [ a ] && { [ b ] && [ c ]; } )"
+prop_checkSubshelledTests5 = verifyNot checkSubshelledTests "( [[ ${var:=x} = y ]] )"
+prop_checkSubshelledTests6 = verifyNot checkSubshelledTests "( [[ $((i++)) = 10 ]] )"
+prop_checkSubshelledTests7 = verifyNot checkSubshelledTests "( [[ $((i+=1)) = 10 ]] )"
+prop_checkSubshelledTests8 = verify checkSubshelledTests "# shellcheck disable=SC2234\nf() ( [[ x ]] )"
+
 checkSubshelledTests params t =
     case t of
-        T_Subshell id list | all isTestStructure list ->
+        T_Subshell id list | all isTestStructure list && (not (hasAssignment t))  ->
             case () of
                 -- Special case for if (test) and while (test)
                 _ | isCompoundCondition (getPath (parentMap params) t) ->
-                    style id 2233 "Remove superfluous (..) around condition."
+                    style id 2233 "Remove superfluous (..) around condition to avoid subshell overhead."
 
-                -- Special case for ([ x ])
-                _ | isSingleTest list ->
-                    style id 2234 "Remove superfluous (..) around test command."
+                -- Special case for ([ x ]), except for func() ( [ x ] )
+                _ | isSingleTest list && (not $ isFunctionBody (getPath (parentMap params) t)) ->
+                    style id 2234 "Remove superfluous (..) around test command to avoid subshell overhead."
 
                 -- General case for ([ x ] || [ y ] && etc)
                 _ -> style id 2235 "Use { ..; } instead of (..) to avoid subshell overhead."
@@ -3766,6 +3819,11 @@ checkSubshelledTests params t =
     isSingleTest cmds =
         case cmds of
             [c] | isTestCommand c -> True
+            _ -> False
+
+    isFunctionBody path =
+        case path of
+            (_:f:_) -> isFunction f
             _ -> False
 
     isTestStructure t =
@@ -3797,6 +3855,19 @@ checkSubshelledTests params t =
             T_WhileExpression {} : _ -> True
             T_UntilExpression {} : _ -> True
             _ -> False
+
+    hasAssignment t = isNothing $ doAnalysis guardNotAssignment t
+    guardNotAssignment t =
+        case t of
+            TA_Assignment {} -> Nothing
+            TA_Unary _ s _ -> guard . not $ "++" `isInfixOf` s || "--" `isInfixOf` s
+            T_DollarBraced _ _ l ->
+                let str = concat $ oversimplify l
+                    modifier = getBracedModifier str
+                in
+                    guard . not $ "=" `isPrefixOf` modifier || ":=" `isPrefixOf` modifier
+            T_DollarBraceCommandExpansion {} -> Nothing
+            _ -> Just ()
 
     -- Skip any parent of a T_Subshell until we reach something interesting
     skippable t =
@@ -4587,6 +4658,65 @@ checkArrayValueUsedAsIndex params _ =
                 return (parent, arrayName)
 
             _ -> Nothing
+
+prop_checkSetESuppressed1  = verifyTree    checkSetESuppressed "set -e; f(){ :; }; x=$(f)"
+prop_checkSetESuppressed2  = verifyNotTree checkSetESuppressed "f(){ :; }; x=$(f)"
+prop_checkSetESuppressed3  = verifyNotTree checkSetESuppressed "set -e; f(){ :; }; x=$(set -e; f)"
+prop_checkSetESuppressed4  = verifyTree    checkSetESuppressed "set -e; f(){ :; }; baz=$(set -e; f) || :"
+prop_checkSetESuppressed5  = verifyNotTree checkSetESuppressed "set -e; f(){ :; }; baz=$(echo \"\") || :"
+prop_checkSetESuppressed6  = verifyTree    checkSetESuppressed "set -e; f(){ :; }; f && echo"
+prop_checkSetESuppressed7  = verifyTree    checkSetESuppressed "set -e; f(){ :; }; f || echo"
+prop_checkSetESuppressed8  = verifyNotTree checkSetESuppressed "set -e; f(){ :; }; echo && f"
+prop_checkSetESuppressed9  = verifyNotTree checkSetESuppressed "set -e; f(){ :; }; echo || f"
+prop_checkSetESuppressed10 = verifyTree    checkSetESuppressed "set -e; f(){ :; }; ! f"
+prop_checkSetESuppressed11 = verifyTree    checkSetESuppressed "set -e; f(){ :; }; if f; then :; fi"
+prop_checkSetESuppressed12 = verifyTree    checkSetESuppressed "set -e; f(){ :; }; if set -e; f; then :; fi"
+prop_checkSetESuppressed13 = verifyTree    checkSetESuppressed "set -e; f(){ :; }; while f; do :; done"
+prop_checkSetESuppressed14 = verifyTree    checkSetESuppressed "set -e; f(){ :; }; while set -e; f; do :; done"
+prop_checkSetESuppressed15 = verifyTree    checkSetESuppressed "set -e; f(){ :; }; until f; do :; done"
+prop_checkSetESuppressed16 = verifyTree    checkSetESuppressed "set -e; f(){ :; }; until set -e; f; do :; done"
+prop_checkSetESuppressed17 = verifyNotTree checkSetESuppressed "set -e; f(){ :; }; g(){ :; }; g f"
+prop_checkSetESuppressed18 = verifyNotTree checkSetESuppressed "set -e; shopt -s inherit_errexit; f(){ :; }; x=$(f)"
+checkSetESuppressed params t =
+    if hasSetE params then runNodeAnalysis checkNode params t else []
+  where
+    checkNode _ (T_SimpleCommand _ _ (cmd:_)) = when (isFunction cmd) (checkCmd cmd)
+    checkNode _ _ = return ()
+
+    functions_ = functions t
+
+    isFunction cmd = isJust $ do
+        literalArg <- getUnquotedLiteral cmd
+        Map.lookup literalArg functions_
+
+    checkCmd cmd = go $ getPath (parentMap params) cmd
+      where
+        go (child:parent:rest) = do
+            case parent of
+                T_Banged _ condition   | child `isIn` [condition] -> informConditional "a ! condition" cmd
+                T_AndIf  _ condition _ | child `isIn` [condition] -> informConditional "an && condition" cmd
+                T_OrIf   _ condition _ | child `isIn` [condition] -> informConditional "an || condition" cmd
+                T_IfExpression    _ condition _ | child `isIn` concatMap fst condition -> informConditional "an 'if' condition" cmd
+                T_UntilExpression _ condition _ | child `isIn` condition -> informConditional "an 'until' condition" cmd
+                T_WhileExpression _ condition _ | child `isIn` condition -> informConditional "a 'while' condition" cmd
+                T_DollarExpansion {} | not $ errExitEnabled parent -> informUninherited cmd
+                T_Backticked      {} | not $ errExitEnabled parent -> informUninherited cmd
+                _ -> return ()
+            go (parent:rest)
+        go _ = return ()
+
+        informConditional condType t =
+            info (getId t) 2310 (
+                "This function is invoked in " ++ condType ++ " so set -e " ++
+                "will be disabled. Invoke separately if failures should " ++
+                "cause the script to exit.")
+        informUninherited t =
+            info (getId t) 2311 (
+                "Bash implicitly disabled set -e for this function " ++
+                "invocation because it's inside a command substitution. " ++
+                "Add set -e; before it or enable inherit_errexit.")
+        errExitEnabled t = hasInheritErrexit params || containsSetE t
+        isIn t cmds = getId t `elem` map getId cmds
 
 
 return []
