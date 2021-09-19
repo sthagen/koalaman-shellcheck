@@ -42,7 +42,7 @@ import Data.List
 import Data.Maybe
 import Data.Ord
 import Data.Semigroup
-import Debug.Trace
+import Debug.Trace -- STRIP
 import qualified Data.Map.Strict as Map
 import Test.QuickCheck.All (forAllProperties)
 import Test.QuickCheck.Test (quickCheckWithResult, stdArgs, maxSuccess)
@@ -791,6 +791,7 @@ prop_checkRedirectToSame5 = verifyNot checkRedirectToSame "foo > bar 2> bar"
 prop_checkRedirectToSame6 = verifyNot checkRedirectToSame "echo foo > foo"
 prop_checkRedirectToSame7 = verifyNot checkRedirectToSame "sed 's/foo/bar/g' file | sponge file"
 prop_checkRedirectToSame8 = verifyNot checkRedirectToSame "while read -r line; do _=\"$fname\"; done <\"$fname\""
+prop_checkRedirectToSame9 = verifyNot checkRedirectToSame "while read -r line; do cat < \"$fname\"; done <\"$fname\""
 checkRedirectToSame params s@(T_Pipeline _ _ list) =
     mapM_ (\l -> (mapM_ (\x -> doAnalysis (checkOccurrences x) l) (getAllRedirs list))) list
   where
@@ -799,6 +800,7 @@ checkRedirectToSame params s@(T_Pipeline _ _ list) =
     checkOccurrences t@(T_NormalWord exceptId x) u@(T_NormalWord newId y) |
         exceptId /= newId
                 && x == y
+                && not (isInput t && isInput u)
                 && not (isOutput t && isOutput u)
                 && not (special t)
                 && not (any isHarmlessCommand [t,u])
@@ -817,6 +819,13 @@ checkRedirectToSame params s@(T_Pipeline _ _ list) =
                        _ -> []
     getRedirs _ = []
     special x = "/dev/" `isPrefixOf` concat (oversimplify x)
+    isInput t =
+        case drop 1 $ getPath (parentMap params) t of
+            T_IoFile _ op _:_ ->
+                case op of
+                    T_Less _  -> True
+                    _ -> False
+            _ -> False
     isOutput t =
         case drop 1 $ getPath (parentMap params) t of
             T_IoFile _ op _:_ ->
@@ -1002,8 +1011,8 @@ checkStderrRedirect params redir@(T_Redirecting _ [
 
 checkStderrRedirect _ _ = return ()
 
-lt x = trace ("Tracing " ++ show x) x
-ltt t = trace ("Tracing " ++ show t)
+lt x = trace ("Tracing " ++ show x) x -- STRIP
+ltt t = trace ("Tracing " ++ show t)  -- STRIP
 
 
 prop_checkSingleQuotedVariables  = verify checkSingleQuotedVariables "echo '$foo'"
@@ -1754,6 +1763,7 @@ prop_checkInexplicablyUnquoted6 = verifyNot checkInexplicablyUnquoted "\"$dir\"s
 prop_checkInexplicablyUnquoted7 = verifyNot checkInexplicablyUnquoted "${dir/\"foo\"/\"bar\"}"
 prop_checkInexplicablyUnquoted8 = verifyNot checkInexplicablyUnquoted "  'foo'\\\n  'bar'"
 prop_checkInexplicablyUnquoted9 = verifyNot checkInexplicablyUnquoted "[[ $x =~ \"foo\"(\"bar\"|\"baz\") ]]"
+prop_checkInexplicablyUnquoted10 = verifyNot checkInexplicablyUnquoted "cmd ${x+--name=\"$x\" --output=\"$x.out\"}"
 checkInexplicablyUnquoted params (T_NormalWord id tokens) = mapM_ check (tails tokens)
   where
     check (T_SingleQuoted _ _:T_Literal id str:_)
@@ -1765,19 +1775,20 @@ checkInexplicablyUnquoted params (T_NormalWord id tokens) = mapM_ check (tails t
             T_DollarExpansion id _ -> warnAboutExpansion id
             T_DollarBraced id _ _ -> warnAboutExpansion id
             T_Literal id s
-                | not (quotesSingleThing a && quotesSingleThing b || isRegex (getPath (parentMap params) trapped)) ->
+                | not (quotesSingleThing a && quotesSingleThing b || isSpecial (getPath (parentMap params) trapped)) ->
                     warnAboutLiteral id
             _ -> return ()
 
     check _ = return ()
 
     -- Regexes for [[ .. =~ re ]] are parsed with metacharacters like ()| as unquoted
-    -- literals, so avoid overtriggering on these.
-    isRegex t =
+    -- literals. The same is true for ${x+"foo" "bar"}. Avoid overtriggering on these.
+    isSpecial t =
         case t of
             (T_Redirecting {} : _) -> False
+            T_DollarBraced {} : _ -> True
             (a:(TC_Binary _ _ "=~" lhs rhs):rest) -> getId a == getId rhs
-            _:rest -> isRegex rest
+            _:rest -> isSpecial rest
             _ -> False
 
     -- If the surrounding quotes quote single things, like "$foo"_and_then_some_"$stuff",

@@ -1,5 +1,6 @@
 ## Git (0.8.0)
 ### Added
+- `disable=all` now conveniently disables all warnings
 - `external-sources=true` directive can be added to .shellcheckrc to make
   shellcheck behave as if `-x` was specified.
 - SC2286-SC2288: Warn when command name ends in a symbol like `/.)'"`
@@ -26,6 +27,9 @@
 - SC2181 now only triggers on single condition tests like `[ $? = 0 ]`.
 - Quote warnings are now emitted for declaration utilities in sh
 - Leading `_` can now be used to suppress warnings about unused variables
+
+### Removed
+- SC1003: Literal backslash+linefeed in '' was found to be usually correct
 
 
 ## v0.7.2 - 2021-04-19
