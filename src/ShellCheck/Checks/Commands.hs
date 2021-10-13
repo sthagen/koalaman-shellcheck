@@ -790,6 +790,7 @@ prop_checkReadExpansions5 = verify checkReadExpansions "read \"$var\""
 prop_checkReadExpansions6 = verify checkReadExpansions "read -a $var"
 prop_checkReadExpansions7 = verifyNot checkReadExpansions "read $1"
 prop_checkReadExpansions8 = verifyNot checkReadExpansions "read ${var?}"
+prop_checkReadExpansions9 = verify checkReadExpansions "read arr[val]"
 checkReadExpansions = CommandCheck (Exactly "read") check
   where
     options = getGnuOpts flagsForRead
@@ -797,12 +798,25 @@ checkReadExpansions = CommandCheck (Exactly "read") check
         opts <- options $ arguments cmd
         return [y | (x,(_, y)) <- opts, null x || x == "a"]
 
-    check cmd = mapM_ warning $ getVars cmd
-    warning t = sequence_ $ do
+    check cmd = do
+        mapM_ dollarWarning $ getVars cmd
+        mapM_ arrayWarning $ arguments cmd
+
+    dollarWarning t = sequence_ $ do
         name <- getSingleUnmodifiedBracedString t
         guard $ isVariableName name   -- e.g. not $1
         return . warn (getId t) 2229 $
             "This does not read '" ++ name ++ "'. Remove $/${} for that, or use ${var?} to quiet."
+
+    arrayWarning word =
+        when (any isUnquotedBracket $ getWordParts word) $
+            warn (getId word) 2313 $
+                "Quote array indices to avoid them expanding as globs."
+
+    isUnquotedBracket t =
+        case t of
+            T_Glob _ ('[':_) -> True
+            _ -> False
 
 -- Return the single variable expansion that makes up this word, if any.
 -- e.g. $foo -> $foo, "$foo"'' -> $foo , "hello $name" -> Nothing
@@ -945,15 +959,29 @@ prop_checkWhileGetoptsCase2 = verify checkWhileGetoptsCase "while getopts 'a:' x
 prop_checkWhileGetoptsCase3 = verifyNot checkWhileGetoptsCase "while getopts 'a:b' x; do case $x in a) foo;; b) bar;; *) :;esac; done"
 prop_checkWhileGetoptsCase4 = verifyNot checkWhileGetoptsCase "while getopts 'a:123' x; do case $x in a) foo;; [0-9]) bar;; esac; done"
 prop_checkWhileGetoptsCase5 = verifyNot checkWhileGetoptsCase "while getopts 'a:' x; do case $x in a) foo;; \\?) bar;; *) baz;; esac; done"
+prop_checkWhileGetoptsCase6 = verifyNot checkWhileGetoptsCase "while getopts 'a:b' x; do case $y in a) foo;; esac; done"
+prop_checkWhileGetoptsCase7 = verifyNot checkWhileGetoptsCase "while getopts 'a:b' x; do case x$x in xa) foo;; xb) foo;; esac; done"
+prop_checkWhileGetoptsCase8 = verifyNot checkWhileGetoptsCase "while getopts 'a:b' x; do x=a; case $x in a) foo;; esac; done"
 checkWhileGetoptsCase = CommandCheck (Exactly "getopts") f
   where
     f :: Token -> Analysis
-    f t@(T_SimpleCommand _ _ (cmd:arg1:_))  = do
+    f t@(T_SimpleCommand _ _ (cmd:arg1:name:_))  = do
         path <- getPathM t
+        params <- ask
         sequence_ $ do
             options <- getLiteralString arg1
+            getoptsVar <- getLiteralString name
             (T_WhileExpression _ _ body) <- findFirst whileLoop path
-            caseCmd <- mapMaybe findCase body !!! 0
+            caseCmd@(T_CaseExpression _ var _) <- mapMaybe findCase body !!! 0
+
+            -- Make sure getopts name and case variable matches
+            [T_DollarBraced _ _ bracedWord] <- return $ getWordParts var
+            [T_Literal _ caseVar] <- return $ getWordParts bracedWord
+            guard $ caseVar == getoptsVar
+
+            -- Make sure the variable isn't modified
+            guard . not $ modifiesVariable params (T_BraceGroup (Id 0) body) getoptsVar
+
             return $ check (getId arg1) (map (:[]) $ filter (/= ':') options) caseCmd
     f _ = return ()
 

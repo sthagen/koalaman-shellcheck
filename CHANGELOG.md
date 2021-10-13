@@ -5,6 +5,7 @@
   shellcheck behave as if `-x` was specified.
 - Optional `check-extra-masked-returns` for pointing out commands with
   suppressed exit codes (SC2312).
+- Optional `require-double-brackets` for recommending \[\[ ]] (SC2292).
 - SC2286-SC2288: Warn when command name ends in a symbol like `/.)'"`
 - SC2289: Warn when command name contains tabs or linefeeds
 - SC2291: Warn about repeated unquoted spaces between words in echo
@@ -16,6 +17,7 @@
 - SC2304-SC2306: Warn about unquoted globs in expr arguments
 - SC2307: Warn about insufficient number of arguments to expr
 - SC2308: Suggest other approaches for non-standard expr extensions
+- SC2313: Warn about `read` with unquoted, array indexed variable
 
 ### Fixed
 - SC2102 about repetitions in ranges no longer triggers on [[ -v arr[xx] ]]
@@ -29,6 +31,7 @@
 - SC2181 now only triggers on single condition tests like `[ $? = 0 ]`.
 - Quote warnings are now emitted for declaration utilities in sh
 - Leading `_` can now be used to suppress warnings about unused variables
+- TTY output now includes warning level in text as well as color
 
 ### Removed
 - SC1004: Literal backslash+linefeed in '' was found to be usually correct
