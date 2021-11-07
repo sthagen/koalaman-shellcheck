@@ -1,5 +1,5 @@
 {-
-    Copyright 2012-2019 Vidar Holen
+    Copyright 2012-2021 Vidar Holen
 
     This file is part of ShellCheck.
     https://www.shellcheck.net
@@ -2048,6 +2048,7 @@ prop_checkSpacefulness42= verifyNotTree checkSpacefulness "run $1 --flags"
 prop_checkSpacefulness43= verifyNotTree checkSpacefulness "$foo=42"
 prop_checkSpacefulness44= verifyTree checkSpacefulness "#!/bin/sh\nexport var=$value"
 prop_checkSpacefulness45= verifyNotTree checkSpacefulness "wait -zzx -p foo; echo $foo"
+prop_checkSpacefulness46= verifyNotTree checkSpacefulness "x=0; (( x += 1 )); echo $x"
 
 data SpaceStatus = SpaceSome | SpaceNone | SpaceEmpty deriving (Eq)
 instance Semigroup SpaceStatus where
@@ -2138,6 +2139,7 @@ checkSpacefulness' onFind params t =
       where
         emit x = tell [x]
 
+    writeF _ (TA_Assignment {}) name _ = setSpaces name SpaceNone >> return []
     writeF _ _ name (DataString SourceExternal) = setSpaces name SpaceSome >> return []
     writeF _ _ name (DataString SourceInteger) = setSpaces name SpaceNone >> return []
 
@@ -4780,6 +4782,8 @@ prop_checkExtraMaskedReturns31 = verifyNotTree checkExtraMaskedReturns "false < 
 prop_checkExtraMaskedReturns32 = verifyNotTree checkExtraMaskedReturns "false < <(basename \"${BASH_SOURCE[0]}\")"
 prop_checkExtraMaskedReturns33 = verifyNotTree checkExtraMaskedReturns "{ false || true; } | true"
 prop_checkExtraMaskedReturns34 = verifyNotTree checkExtraMaskedReturns "{ false || :; } | true"
+prop_checkExtraMaskedReturns35 = verifyTree checkExtraMaskedReturns "f() { local -r x=$(false); }"
+
 checkExtraMaskedReturns params t = runNodeAnalysis findMaskingNodes params t
   where
     findMaskingNodes _ (T_Arithmetic _ list) = findMaskedNodesInList [list]
@@ -4826,8 +4830,13 @@ checkExtraMaskedReturns params t = runNodeAnalysis findMaskingNodes params t
     isCheckedElsewhere t = hasParent isDeclaringCommand t
       where
         isDeclaringCommand t _ = fromMaybe False $ do
-            basename <- getCommandBasename t
-            return $ basename `elem` declaringCommands
+            cmd <- getCommand t
+            basename <- getCommandBasename cmd
+            return $
+                case basename of
+                    -- local -r x=$(false) is intentionally ignored for SC2155
+                    "local" | "r" `elem` (map snd $ getAllFlags cmd) -> False
+                    _ -> basename `elem` declaringCommands
 
     isHarmlessCommand t = fromMaybe False $ do
         basename <- getCommandBasename t
