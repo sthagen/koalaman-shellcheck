@@ -199,6 +199,7 @@ nodeChecks = [
     ,checkComparisonWithLeadingX
     ,checkCommandWithTrailingSymbol
     ,checkUnquotedParameterExpansionPattern
+    ,checkBatsTestDoesNotUseNegation
     ]
 
 optionalChecks = map fst optionalTreeChecks
@@ -2049,6 +2050,8 @@ prop_checkSpacefulness43= verifyNotTree checkSpacefulness "$foo=42"
 prop_checkSpacefulness44= verifyTree checkSpacefulness "#!/bin/sh\nexport var=$value"
 prop_checkSpacefulness45= verifyNotTree checkSpacefulness "wait -zzx -p foo; echo $foo"
 prop_checkSpacefulness46= verifyNotTree checkSpacefulness "x=0; (( x += 1 )); echo $x"
+prop_checkSpacefulness47= verifyNotTree checkSpacefulness "x=0; (( x-- )); echo $x"
+prop_checkSpacefulness48= verifyNotTree checkSpacefulness "x=0; (( ++x )); echo $x"
 
 data SpaceStatus = SpaceSome | SpaceNone | SpaceEmpty deriving (Eq)
 instance Semigroup SpaceStatus where
@@ -2139,7 +2142,6 @@ checkSpacefulness' onFind params t =
       where
         emit x = tell [x]
 
-    writeF _ (TA_Assignment {}) name _ = setSpaces name SpaceNone >> return []
     writeF _ _ name (DataString SourceExternal) = setSpaces name SpaceSome >> return []
     writeF _ _ name (DataString SourceInteger) = setSpaces name SpaceNone >> return []
 
@@ -2296,7 +2298,7 @@ checkFunctionsUsedExternally params t =
                 let args = skipOver t argv
                 let argStrings = map (\x -> (fromMaybe "" $ getLiteralString x, x)) args
                 let candidates = getPotentialCommands name argStrings
-                mapM_ (checkArg name) candidates
+                mapM_ (checkArg name (getId t)) candidates
             _ -> return ()
     checkCommand _ _ = return ()
 
@@ -2322,14 +2324,19 @@ checkFunctionsUsedExternally params t =
 
     functionsAndAliases = Map.union (functions t) (aliases t)
 
-    checkArg cmd (_, arg) = sequence_ $ do
+    patternContext id =
+        case posLine . fst <$> Map.lookup id (tokenPositions params) of
+          Just l -> " on line " <> show l <> "."
+          _      -> "."
+
+    checkArg cmd cmdId (_, arg) = sequence_ $ do
         literalArg <- getUnquotedLiteral arg  -- only consider unquoted literals
         definitionId <- Map.lookup literalArg functionsAndAliases
         return $ do
             warn (getId arg) 2033
-              "Shell functions can't be passed to external commands."
+              "Shell functions can't be passed to external commands. Use separate script or sh -c."
             info definitionId 2032 $
-              "Use own script or sh -c '..' to run this from " ++ cmd ++ "."
+              "This function can't be invoked via " ++ cmd ++ patternContext cmdId
 
 prop_checkUnused0 = verifyNotTree checkUnusedAssignments "var=foo; echo $var"
 prop_checkUnused1 = verifyTree checkUnusedAssignments "var=foo; echo $bar"
@@ -4856,6 +4863,45 @@ checkExtraMaskedReturns params t = runNodeAnalysis findMaskingNodes params t
 
     hasParent pred t = any (uncurry pred) (parentChildPairs t)
 
+
+-- hard error on negated command that is not last
+prop_checkBatsTestDoesNotUseNegation1 = verify checkBatsTestDoesNotUseNegation "#!/usr/bin/env/bats\n@test \"name\" { ! true;  false; }"
+prop_checkBatsTestDoesNotUseNegation2 = verify checkBatsTestDoesNotUseNegation "#!/usr/bin/env/bats\n@test \"name\" { ! [[ -e test ]]; false; }"
+prop_checkBatsTestDoesNotUseNegation3 = verify checkBatsTestDoesNotUseNegation "#!/usr/bin/env/bats\n@test \"name\" { ! [ -e test ]; false; }"
+-- acceptable formats:
+--     using run
+prop_checkBatsTestDoesNotUseNegation4 = verifyNot checkBatsTestDoesNotUseNegation "#!/usr/bin/env/bats\n@test \"name\" { run ! true; }"
+--     using || false
+prop_checkBatsTestDoesNotUseNegation5 = verifyNot checkBatsTestDoesNotUseNegation "#!/usr/bin/env/bats\n@test \"name\" { ! [[ -e test ]] || false; }"
+prop_checkBatsTestDoesNotUseNegation6 = verifyNot checkBatsTestDoesNotUseNegation "#!/usr/bin/env/bats\n@test \"name\" { ! [ -e test ] || false; }"
+-- only style warning when last command
+prop_checkBatsTestDoesNotUseNegation7 = verifyCodes checkBatsTestDoesNotUseNegation [2314] "#!/usr/bin/env/bats\n@test \"name\" { ! true; }"
+prop_checkBatsTestDoesNotUseNegation8 = verifyCodes checkBatsTestDoesNotUseNegation [2315] "#!/usr/bin/env/bats\n@test \"name\" { ! [[ -e test ]]; }"
+prop_checkBatsTestDoesNotUseNegation9 = verifyCodes checkBatsTestDoesNotUseNegation [2315] "#!/usr/bin/env/bats\n@test \"name\" { ! [ -e test ]; }"
+
+checkBatsTestDoesNotUseNegation params t =
+    case t of
+        T_BatsTest _ _ (T_BraceGroup _ commands) -> mapM_ (check commands) commands
+        _ -> return ()
+  where
+    check commands t =
+        case t of
+            T_Banged id (T_Pipeline _ _ [T_Redirecting _ _ (T_Condition idCondition _ _)]) ->
+                                if t `isLastOf` commands
+                                then style id 2315 "In Bats, ! will not fail the test if it is not the last command anymore. Fold the `!` into the conditional!"
+                                else err   id 2315 "In Bats, ! does not cause a test failure. Fold the `!` into the conditional!"
+
+            T_Banged id cmd -> if t `isLastOf` commands
+                                then styleWithFix id 2314 "In Bats, ! will not fail the test if it is not the last command anymore. Use `run ! ` (on Bats >= 1.5.0) instead."
+                                                (fixWith [replaceStart id params 0 "run "])
+                                else errWithFix   id 2314 "In Bats, ! does not cause a test failure. Use 'run ! ' (on Bats >= 1.5.0) instead."
+                                                (fixWith [replaceStart id params 0 "run "])
+            _ -> return ()
+    isLastOf t commands =
+        case commands of
+            [x] -> x == t
+            x:rest -> isLastOf t rest
+            [] -> False
 
 return []
 runTests =  $( [| $(forAllProperties) (quickCheckWithResult (stdArgs { maxSuccess = 1 }) ) |])

@@ -98,7 +98,7 @@ commandChecks = [
     ,checkUnquotedEchoSpaces
     ,checkEvalArray
     ]
-    ++ map checkArgComparison declaringCommands
+    ++ map checkArgComparison ("alias" : declaringCommands)
     ++ map checkMaskedReturns declaringCommands
 
 
@@ -735,7 +735,7 @@ getPrintfFormats = getFormats
         --            \____ _____/\___ ____/   \____ ____/\_________ _________/ \______ /
         --                 V          V             V               V               V
         --               flags    field width  precision   format character        rest
-        -- field width and precision can be specified with a '*' instead of a digit,
+        -- field width and precision can be specified with an '*' instead of a digit,
         -- in which case printf will accept one more argument for each '*' used
 
 
@@ -1253,6 +1253,7 @@ prop_checkArgComparison3 = verifyNot (checkArgComparison "declare") "declare a=b
 prop_checkArgComparison4 = verify (checkArgComparison "export") "export a +=b"
 prop_checkArgComparison7 = verifyNot (checkArgComparison "declare") "declare -a +i foo"
 prop_checkArgComparison8 = verify (checkArgComparison "let") "let x = 0"
+prop_checkArgComparison9 = verify (checkArgComparison "alias") "alias x =0"
 -- This mirrors checkSecondArgIsComparison but for arguments to local/readonly/declare/export
 checkArgComparison cmd = CommandCheck (Exactly cmd) wordsWithEqual
   where

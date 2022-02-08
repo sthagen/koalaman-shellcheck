@@ -351,7 +351,7 @@ isQuoteFreeNode strict shell tree t =
             T_SelectIn {}                   -> return (not strict)
             _                               -> Nothing
 
-    -- Check whether this assigment is self-quoting due to being a recognized
+    -- Check whether this assignment is self-quoting due to being a recognized
     -- assignment passed to a Declaration Utility. This will soon be required
     -- by POSIX: https://austingroupbugs.net/view.php?id=351
     assignmentIsQuoting t = shellParsesParamsAsAssignments || not (isAssignmentParamToCommand t)
@@ -511,13 +511,11 @@ getModifiedVariables t =
         T_SimpleCommand {} ->
             getModifiedVariableCommand t
 
-        TA_Unary _ "++|" v@(TA_Variable _ name _)  ->
-            [(t, v, name, DataString $ SourceFrom [v])]
-        TA_Unary _ "|++" v@(TA_Variable _ name _)  ->
-            [(t, v, name, DataString $ SourceFrom [v])]
+        TA_Unary _ op v@(TA_Variable _ name _) | "--" `isInfixOf` op || "++" `isInfixOf` op ->
+            [(t, v, name, DataString SourceInteger)]
         TA_Assignment _ op (TA_Variable _ name _) rhs -> do
             guard $ op `elem` ["=", "*=", "/=", "%=", "+=", "-=", "<<=", ">>=", "&=", "^=", "|="]
-            return (t, t, name, DataString $ SourceFrom [rhs])
+            return (t, t, name, DataString SourceInteger)
 
         T_BatsTest {} -> [
             (t, t, "lines", DataArray SourceExternal),
