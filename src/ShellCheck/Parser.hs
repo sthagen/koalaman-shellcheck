@@ -27,6 +27,7 @@ import ShellCheck.AST
 import ShellCheck.ASTLib hiding (runTests)
 import ShellCheck.Data
 import ShellCheck.Interface
+import ShellCheck.Prelude
 
 import Control.Applicative ((<*), (*>))
 import Control.Monad
@@ -210,7 +211,7 @@ getNextIdSpanningTokenList list =
 -- Get the span covered by an id
 getSpanForId :: Monad m => Id -> SCParser m (SourcePos, SourcePos)
 getSpanForId id =
-    Map.findWithDefault (error "Internal error: no position for id. Please report!") id <$>
+    Map.findWithDefault (error $ pleaseReport "no parser span for id") id <$>
         getMap
 
 -- Create a new id with the same span as an existing one
@@ -1918,7 +1919,7 @@ readPendingHereDocs = do
                         -- The end token is just a prefix
                         skipLine
                     | hasTrailer ->
-                        error "ShellCheck bug, please report (here doc trailer)."
+                        error $ pleaseReport "unexpected heredoc trailer"
 
                     -- The following cases assume no trailing text:
                     | dashed == Undashed && (not $ null leadingSpace) -> do
@@ -2286,7 +2287,7 @@ readAndOr = do
         parseProblemAt apos ErrorC 1123 "ShellCheck directives are only valid in front of complete compound commands, like 'if', not e.g. individual 'elif' branches."
 
     andOr <- withAnnotations annotations $
-        chainr1 readPipeline $ do
+        chainl1 readPipeline $ do
             op <- g_AND_IF <|> g_OR_IF
             readLineBreak
             return $ case op of T_AND_IF id -> T_AndIf id
@@ -3463,9 +3464,9 @@ notesForContext list = zipWith ($) [first, second] $ filter isName list
 
 -- Go over all T_UnparsedIndex and reparse them as either arithmetic or text
 -- depending on declare -A statements.
-reparseIndices root =
-   analyze blank blank f root
+reparseIndices root = process root
   where
+    process = analyze blank blank f
     associative = getAssociativeArrays root
     isAssociative s = s `elem` associative
     f (T_Assignment id mode name indices value) = do
@@ -3490,8 +3491,9 @@ reparseIndices root =
 
     fixAssignmentIndex name word =
         case word of
-            T_UnparsedIndex id pos src ->
-                parsed name pos src
+            T_UnparsedIndex id pos src -> do
+                idx <- parsed name pos src
+                process idx -- Recursively parse for cases like x[y[z=1]]=1
             _ -> return word
 
     parsed name pos src =

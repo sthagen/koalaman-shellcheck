@@ -1,10 +1,16 @@
 ## Git
 ### Added
 - SC2316: Warn about 'local readonly foo' and similar (thanks, patrickxia!)
+- SC2317: Warn about unreachable commands
 
 ### Fixed
+- SC2086: Now uses DFA to make more accurate predictions about values
 
 ### Changed
+- ShellCheck now has a Data Flow Analysis engine to make smarter decisions
+  based on control flow rather than just syntax. Existing checks will
+  gradually start using it, which may cause them to trigger differently
+  (but more accurately).
 
 
 ## v0.8.0 - 2021-11-06
