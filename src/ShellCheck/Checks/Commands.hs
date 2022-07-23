@@ -27,6 +27,8 @@ module ShellCheck.Checks.Commands (checker, optionalChecks, ShellCheck.Checks.Co
 import ShellCheck.AST
 import ShellCheck.ASTLib
 import ShellCheck.AnalyzerLib
+import ShellCheck.CFG
+import qualified ShellCheck.CFGAnalysis as CF
 import ShellCheck.Data
 import ShellCheck.Interface
 import ShellCheck.Parser
@@ -37,11 +39,15 @@ import Control.Monad
 import Control.Monad.RWS
 import Data.Char
 import Data.Functor.Identity
+import qualified Data.Graph.Inductive.Graph as G
 import Data.List
 import Data.Maybe
-import qualified Data.Map.Strict as Map
+import qualified Data.Map.Strict as M
+import qualified Data.Set as S
 import Test.QuickCheck.All (forAllProperties)
 import Test.QuickCheck.Test (quickCheckWithResult, stdArgs, maxSuccess)
+
+import Debug.Trace -- STRIP
 
 data CommandName = Exactly String | Basename String
     deriving (Eq, Ord)
@@ -102,6 +108,7 @@ commandChecks = [
     ++ map checkArgComparison ("alias" : declaringCommands)
     ++ map checkMaskedReturns declaringCommands
     ++ map checkMultipleDeclaring declaringCommands
+    ++ map checkBackreferencingDeclaration declaringCommands
 
 
 optionalChecks = map fst optionalCommandChecks
@@ -114,7 +121,7 @@ optionalCommandChecks = [
         cdNegative = "command -v javac"
     }, checkWhich)
     ]
-optionalCheckMap = Map.fromList $ map (\(desc, check) -> (cdName desc, check)) optionalCommandChecks
+optionalCheckMap = M.fromList $ map (\(desc, check) -> (cdName desc, check)) optionalCommandChecks
 
 prop_verifyOptionalExamples = all check optionalCommandChecks
   where
@@ -163,27 +170,27 @@ prop_checkGenericOptsT1 = checkGetOpts "-x -- -y" ["x"] ["-y"] $ return . getGen
 prop_checkGenericOptsT2 = checkGetOpts "-xy --" ["x", "y"] [] $ return . getGenericOpts
 
 
-buildCommandMap :: [CommandCheck] -> Map.Map CommandName (Token -> Analysis)
-buildCommandMap = foldl' addCheck Map.empty
+buildCommandMap :: [CommandCheck] -> M.Map CommandName (Token -> Analysis)
+buildCommandMap = foldl' addCheck M.empty
   where
     addCheck map (CommandCheck name function) =
-        Map.insertWith composeAnalyzers name function map
+        M.insertWith composeAnalyzers name function map
 
 
-checkCommand :: Map.Map CommandName (Token -> Analysis) -> Token -> Analysis
+checkCommand :: M.Map CommandName (Token -> Analysis) -> Token -> Analysis
 checkCommand map t@(T_SimpleCommand id cmdPrefix (cmd:rest)) = sequence_ $ do
     name <- getLiteralString cmd
     return $
         if '/' `elem` name
         then
-            Map.findWithDefault nullCheck (Basename $ basename name) map t
+            M.findWithDefault nullCheck (Basename $ basename name) map t
         else if name == "builtin" && not (null rest) then
             let t' = T_SimpleCommand id cmdPrefix rest
                 selectedBuiltin = fromMaybe "" $ getLiteralString . head $ rest
-            in Map.findWithDefault nullCheck (Exactly selectedBuiltin) map t'
+            in M.findWithDefault nullCheck (Exactly selectedBuiltin) map t'
         else do
-            Map.findWithDefault nullCheck (Exactly name) map t
-            Map.findWithDefault nullCheck (Basename name) map t
+            M.findWithDefault nullCheck (Exactly name) map t
+            M.findWithDefault nullCheck (Basename name) map t
 
   where
     basename = reverse . takeWhile (/= '/') . reverse
@@ -205,22 +212,22 @@ checker spec params = getChecker $ commandChecks ++ optionals
     optionals =
         if "all" `elem` keys
         then map snd optionalCommandChecks
-        else mapMaybe (\x -> Map.lookup x optionalCheckMap) keys
+        else mapMaybe (\x -> M.lookup x optionalCheckMap) keys
 
 prop_checkTr1 = verify checkTr "tr [a-f] [A-F]"
 prop_checkTr2 = verify checkTr "tr 'a-z' 'A-Z'"
-prop_checkTr2a= verify checkTr "tr '[a-z]' '[A-Z]'"
+prop_checkTr2a = verify checkTr "tr '[a-z]' '[A-Z]'"
 prop_checkTr3 = verifyNot checkTr "tr -d '[:lower:]'"
-prop_checkTr3a= verifyNot checkTr "tr -d '[:upper:]'"
-prop_checkTr3b= verifyNot checkTr "tr -d '|/_[:upper:]'"
+prop_checkTr3a = verifyNot checkTr "tr -d '[:upper:]'"
+prop_checkTr3b = verifyNot checkTr "tr -d '|/_[:upper:]'"
 prop_checkTr4 = verifyNot checkTr "ls [a-z]"
 prop_checkTr5 = verify checkTr "tr foo bar"
 prop_checkTr6 = verify checkTr "tr 'hello' 'world'"
 prop_checkTr8 = verifyNot checkTr "tr aeiou _____"
 prop_checkTr9 = verifyNot checkTr "a-z n-za-m"
-prop_checkTr10= verifyNot checkTr "tr --squeeze-repeats rl lr"
-prop_checkTr11= verifyNot checkTr "tr abc '[d*]'"
-prop_checkTr12= verifyNot checkTr "tr '[=e=]' 'e'"
+prop_checkTr10 = verifyNot checkTr "tr --squeeze-repeats rl lr"
+prop_checkTr11 = verifyNot checkTr "tr abc '[d*]'"
+prop_checkTr12 = verifyNot checkTr "tr '[=e=]' 'e'"
 checkTr = CommandCheck (Basename "tr") (mapM_ f . arguments)
   where
     f w | isGlob w = -- The user will go [ab] -> '[ab]' -> 'ab'. Fixme?
@@ -332,20 +339,20 @@ prop_checkGrepRe6 = verifyNot checkGrepRe "grep foo \\*.mp3"
 prop_checkGrepRe7 = verify checkGrepRe "grep *foo* file"
 prop_checkGrepRe8 = verify checkGrepRe "ls | grep foo*.jpg"
 prop_checkGrepRe9 = verifyNot checkGrepRe "grep '[0-9]*' file"
-prop_checkGrepRe10= verifyNot checkGrepRe "grep '^aa*' file"
-prop_checkGrepRe11= verifyNot checkGrepRe "grep --include=*.png foo"
-prop_checkGrepRe12= verifyNot checkGrepRe "grep -F 'Foo*' file"
-prop_checkGrepRe13= verifyNot checkGrepRe "grep -- -foo bar*"
-prop_checkGrepRe14= verifyNot checkGrepRe "grep -e -foo bar*"
-prop_checkGrepRe15= verifyNot checkGrepRe "grep --regex -foo bar*"
-prop_checkGrepRe16= verifyNot checkGrepRe "grep --include 'Foo*' file"
-prop_checkGrepRe17= verifyNot checkGrepRe "grep --exclude 'Foo*' file"
-prop_checkGrepRe18= verifyNot checkGrepRe "grep --exclude-dir 'Foo*' file"
-prop_checkGrepRe19= verify checkGrepRe "grep -- 'Foo*' file"
-prop_checkGrepRe20= verifyNot checkGrepRe "grep --fixed-strings 'Foo*' file"
-prop_checkGrepRe21= verifyNot checkGrepRe "grep -o 'x*' file"
-prop_checkGrepRe22= verifyNot checkGrepRe "grep --only-matching 'x*' file"
-prop_checkGrepRe23= verifyNot checkGrepRe "grep '.*' file"
+prop_checkGrepRe10 = verifyNot checkGrepRe "grep '^aa*' file"
+prop_checkGrepRe11 = verifyNot checkGrepRe "grep --include=*.png foo"
+prop_checkGrepRe12 = verifyNot checkGrepRe "grep -F 'Foo*' file"
+prop_checkGrepRe13 = verifyNot checkGrepRe "grep -- -foo bar*"
+prop_checkGrepRe14 = verifyNot checkGrepRe "grep -e -foo bar*"
+prop_checkGrepRe15 = verifyNot checkGrepRe "grep --regex -foo bar*"
+prop_checkGrepRe16 = verifyNot checkGrepRe "grep --include 'Foo*' file"
+prop_checkGrepRe17 = verifyNot checkGrepRe "grep --exclude 'Foo*' file"
+prop_checkGrepRe18 = verifyNot checkGrepRe "grep --exclude-dir 'Foo*' file"
+prop_checkGrepRe19 = verify checkGrepRe "grep -- 'Foo*' file"
+prop_checkGrepRe20 = verifyNot checkGrepRe "grep --fixed-strings 'Foo*' file"
+prop_checkGrepRe21 = verifyNot checkGrepRe "grep -o 'x*' file"
+prop_checkGrepRe22 = verifyNot checkGrepRe "grep --only-matching 'x*' file"
+prop_checkGrepRe23 = verifyNot checkGrepRe "grep '.*' file"
 
 checkGrepRe = CommandCheck (Basename "grep") check where
     check cmd = f cmd (arguments cmd)
@@ -393,7 +400,7 @@ checkGrepRe = CommandCheck (Basename "grep") check where
 
 
 prop_checkTrapQuotes1 = verify checkTrapQuotes "trap \"echo $num\" INT"
-prop_checkTrapQuotes1a= verify checkTrapQuotes "trap \"echo `ls`\" INT"
+prop_checkTrapQuotes1a = verify checkTrapQuotes "trap \"echo `ls`\" INT"
 prop_checkTrapQuotes2 = verifyNot checkTrapQuotes "trap 'echo $num' INT"
 prop_checkTrapQuotes3 = verify checkTrapQuotes "trap \"echo $((1+num))\" EXIT DEBUG"
 checkTrapQuotes = CommandCheck (Exactly "trap") (f . arguments) where
@@ -650,19 +657,19 @@ prop_checkPrintfVar6 = verify checkPrintfVar "printf foo bar baz"
 prop_checkPrintfVar7 = verify checkPrintfVar "printf -- foo bar baz"
 prop_checkPrintfVar8 = verifyNot checkPrintfVar "printf '%s %s %s' \"${var[@]}\""
 prop_checkPrintfVar9 = verifyNot checkPrintfVar "printf '%s %s %s\\n' *.png"
-prop_checkPrintfVar10= verifyNot checkPrintfVar "printf '%s %s %s' foo bar baz"
-prop_checkPrintfVar11= verifyNot checkPrintfVar "printf '%(%s%s)T' -1"
-prop_checkPrintfVar12= verify checkPrintfVar "printf '%s %s\\n' 1 2 3"
-prop_checkPrintfVar13= verifyNot checkPrintfVar "printf '%s %s\\n' 1 2 3 4"
-prop_checkPrintfVar14= verify checkPrintfVar "printf '%*s\\n' 1"
-prop_checkPrintfVar15= verifyNot checkPrintfVar "printf '%*s\\n' 1 2"
-prop_checkPrintfVar16= verifyNot checkPrintfVar "printf $'string'"
-prop_checkPrintfVar17= verify checkPrintfVar "printf '%-*s\\n' 1"
-prop_checkPrintfVar18= verifyNot checkPrintfVar "printf '%-*s\\n' 1 2"
-prop_checkPrintfVar19= verifyNot checkPrintfVar "printf '%(%s)T'"
-prop_checkPrintfVar20= verifyNot checkPrintfVar "printf '%d %(%s)T' 42"
-prop_checkPrintfVar21= verify checkPrintfVar "printf '%d %(%s)T'"
-prop_checkPrintfVar22= verify checkPrintfVar "printf '%s\n%s' foo"
+prop_checkPrintfVar10 = verifyNot checkPrintfVar "printf '%s %s %s' foo bar baz"
+prop_checkPrintfVar11 = verifyNot checkPrintfVar "printf '%(%s%s)T' -1"
+prop_checkPrintfVar12 = verify checkPrintfVar "printf '%s %s\\n' 1 2 3"
+prop_checkPrintfVar13 = verifyNot checkPrintfVar "printf '%s %s\\n' 1 2 3 4"
+prop_checkPrintfVar14 = verify checkPrintfVar "printf '%*s\\n' 1"
+prop_checkPrintfVar15 = verifyNot checkPrintfVar "printf '%*s\\n' 1 2"
+prop_checkPrintfVar16 = verifyNot checkPrintfVar "printf $'string'"
+prop_checkPrintfVar17 = verify checkPrintfVar "printf '%-*s\\n' 1"
+prop_checkPrintfVar18 = verifyNot checkPrintfVar "printf '%-*s\\n' 1 2"
+prop_checkPrintfVar19 = verifyNot checkPrintfVar "printf '%(%s)T'"
+prop_checkPrintfVar20 = verifyNot checkPrintfVar "printf '%d %(%s)T' 42"
+prop_checkPrintfVar21 = verify checkPrintfVar "printf '%d %(%s)T'"
+prop_checkPrintfVar22 = verify checkPrintfVar "printf '%s\n%s' foo"
 
 checkPrintfVar = CommandCheck (Exactly "printf") (f . arguments) where
     f (doubledash:rest) | getLiteralString doubledash == Just "--" = f rest
@@ -1005,20 +1012,20 @@ checkWhileGetoptsCase = CommandCheck (Exactly "getopts") f
 
     check :: Id -> [String] -> Token -> Analysis
     check optId opts (T_CaseExpression id _ list) = do
-            unless (Nothing `Map.member` handledMap) $ do
-                mapM_ (warnUnhandled optId id) $ catMaybes $ Map.keys notHandled
+            unless (Nothing `M.member` handledMap) $ do
+                mapM_ (warnUnhandled optId id) $ catMaybes $ M.keys notHandled
 
-                unless (any (`Map.member` handledMap) [Just "*",Just "?"]) $
+                unless (any (`M.member` handledMap) [Just "*",Just "?"]) $
                     warn id 2220 "Invalid flags are not handled. Add a *) case."
 
-            mapM_ warnRedundant $ Map.toList notRequested
+            mapM_ warnRedundant $ M.toList notRequested
 
         where
-            handledMap = Map.fromList (concatMap getHandledStrings list)
-            requestedMap = Map.fromList $ map (\x -> (Just x, ())) opts
+            handledMap = M.fromList (concatMap getHandledStrings list)
+            requestedMap = M.fromList $ map (\x -> (Just x, ())) opts
 
-            notHandled = Map.difference requestedMap handledMap
-            notRequested = Map.difference handledMap requestedMap
+            notHandled = M.difference requestedMap handledMap
+            notRequested = M.difference handledMap requestedMap
 
     warnUnhandled optId caseId str =
         warn caseId 2213 $ "getopts specified -" ++ (e4m str) ++ ", but it's not handled by this 'case'."
@@ -1062,10 +1069,10 @@ prop_checkCatastrophicRm4 = verify checkCatastrophicRm "rm -fr /home/$(whoami)/*
 prop_checkCatastrophicRm5 = verifyNot checkCatastrophicRm "rm -r /home/${USER:-thing}/*"
 prop_checkCatastrophicRm6 = verify checkCatastrophicRm "rm --recursive /etc/*$config*"
 prop_checkCatastrophicRm8 = verify checkCatastrophicRm "rm -rf /home"
-prop_checkCatastrophicRm10= verifyNot checkCatastrophicRm "rm -r \"${DIR}\"/{.gitignore,.gitattributes,ci}"
-prop_checkCatastrophicRm11= verify checkCatastrophicRm "rm -r /{bin,sbin}/$exec"
-prop_checkCatastrophicRm12= verify checkCatastrophicRm "rm -r /{{usr,},{bin,sbin}}/$exec"
-prop_checkCatastrophicRm13= verifyNot checkCatastrophicRm "rm -r /{{a,b},{c,d}}/$exec"
+prop_checkCatastrophicRm10 = verifyNot checkCatastrophicRm "rm -r \"${DIR}\"/{.gitignore,.gitattributes,ci}"
+prop_checkCatastrophicRm11 = verify checkCatastrophicRm "rm -r /{bin,sbin}/$exec"
+prop_checkCatastrophicRm12 = verify checkCatastrophicRm "rm -r /{{usr,},{bin,sbin}}/$exec"
+prop_checkCatastrophicRm13 = verifyNot checkCatastrophicRm "rm -r /{{a,b},{c,d}}/$exec"
 prop_checkCatastrophicRmA = verify checkCatastrophicRm "rm -rf /usr /lib/nvidia-current/xorg/xorg"
 prop_checkCatastrophicRmB = verify checkCatastrophicRm "rm -rf \"$STEAMROOT/\"*"
 checkCatastrophicRm = CommandCheck (Basename "rm") $ \t ->
@@ -1372,10 +1379,10 @@ checkUnquotedEchoSpaces = CommandCheck (Basename "echo") check
         m <- asks tokenPositions
         redir <- getClosestCommandM t
         sequence_ $ do
-            let positions = mapMaybe (\c -> Map.lookup (getId c) m) args
+            let positions = mapMaybe (\c -> M.lookup (getId c) m) args
             let pairs = zip positions (drop 1 positions)
             (T_Redirecting _ redirTokens _) <- redir
-            let redirPositions = mapMaybe (\c -> fst <$> Map.lookup (getId c) m) redirTokens
+            let redirPositions = mapMaybe (\c -> fst <$> M.lookup (getId c) m) redirTokens
             guard $ any (hasSpacesBetween redirPositions) pairs
             return $ info (getId t) 2291 "Quote repeated spaces to avoid them collapsing into one."
 
@@ -1403,6 +1410,52 @@ checkEvalArray = CommandCheck (Exactly "eval") (mapM_ check . concatMap getWordP
             -- Match ${arr[@]@Q} and ${@@Q} and such
             T_DollarBraced _ _ l -> 'Q' `elem` getBracedModifier (concat $ oversimplify l)
             _ -> False
+
+
+prop_checkBackreferencingDeclaration1 = verify (checkBackreferencingDeclaration "declare") "declare x=1 y=foo$x"
+prop_checkBackreferencingDeclaration2 = verify (checkBackreferencingDeclaration "readonly") "readonly x=1 y=$((1+x))"
+prop_checkBackreferencingDeclaration3 = verify (checkBackreferencingDeclaration "local") "local x=1 y=$(echo $x)"
+prop_checkBackreferencingDeclaration4 = verify (checkBackreferencingDeclaration "local") "local x=1 y[$x]=z"
+prop_checkBackreferencingDeclaration5 = verify (checkBackreferencingDeclaration "declare") "declare x=var $x=1"
+prop_checkBackreferencingDeclaration6 = verify (checkBackreferencingDeclaration "declare") "declare x=var $x=1"
+prop_checkBackreferencingDeclaration7 = verify (checkBackreferencingDeclaration "declare") "declare x=var $k=$x"
+checkBackreferencingDeclaration cmd = CommandCheck (Exactly cmd) check
+  where
+    check t = foldM_ perArg M.empty $ arguments t
+
+    perArg leftArgs t =
+        case t of
+            T_Assignment id _ name idx t -> do
+                warnIfBackreferencing leftArgs $ t:idx
+                return $ M.insert name id leftArgs
+            t -> do
+                warnIfBackreferencing leftArgs [t]
+                return leftArgs
+
+    warnIfBackreferencing backrefs l = do
+        references <- findReferences l
+        let reused = M.intersection backrefs references
+        mapM msg $ M.toList reused
+
+    msg (name, id) = warn id 2318 $ "This assignment is used again in this '" ++ cmd ++ "', but won't have taken effect. Use two '" ++ cmd ++ "'s."
+
+    findReferences list = do
+        cfga <- asks cfgAnalysis
+        let graph = CF.graph cfga
+        let nodesMap = CF.tokenToNodes cfga
+        let nodes = S.unions $ map (\id -> M.findWithDefault S.empty id nodesMap) $ map getId $ list
+        let labels = mapMaybe (G.lab graph) $ S.toList nodes
+        let references = M.fromList $ concatMap refFromLabel labels
+        return references
+
+    refFromLabel lab =
+        case lab of
+            CFApplyEffects effects -> mapMaybe refFromEffect effects
+            _ -> []
+    refFromEffect e =
+        case e of
+            IdTagged id (CFReadVariable name) -> return (name, id)
+            _ -> Nothing
 
 
 return []
