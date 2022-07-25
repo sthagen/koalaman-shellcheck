@@ -481,9 +481,16 @@ prop_checkUnusedEchoEscapes2 = verifyNot checkUnusedEchoEscapes "echo -e 'foi\\n
 prop_checkUnusedEchoEscapes3 = verify checkUnusedEchoEscapes "echo \"n:\\t42\""
 prop_checkUnusedEchoEscapes4 = verifyNot checkUnusedEchoEscapes "echo lol"
 prop_checkUnusedEchoEscapes5 = verifyNot checkUnusedEchoEscapes "echo -n -e '\n'"
+prop_checkUnusedEchoEscapes6 = verify checkUnusedEchoEscapes "echo '\\506'"
+prop_checkUnusedEchoEscapes7 = verify checkUnusedEchoEscapes "echo '\\5a'"
+prop_checkUnusedEchoEscapes8 = verifyNot checkUnusedEchoEscapes "echo '\\8a'"
+prop_checkUnusedEchoEscapes9 = verifyNot checkUnusedEchoEscapes "echo '\\d5a'"
+prop_checkUnusedEchoEscapes10 = verify checkUnusedEchoEscapes "echo '\\x4a'"
+prop_checkUnusedEchoEscapes11 = verify checkUnusedEchoEscapes "echo '\\xat'"
+prop_checkUnusedEchoEscapes12 = verifyNot checkUnusedEchoEscapes "echo '\\xth'"
 checkUnusedEchoEscapes = CommandCheck (Basename "echo") f
   where
-    hasEscapes = mkRegex "\\\\[rnt]"
+    hasEscapes = mkRegex "\\\\([rntabefv\\']|[0-7]{1,3}|x([0-9]|[A-F]|[a-f]){1,2})"
     f cmd =
         whenShell [Sh, Bash, Ksh] $
             unless (cmd `hasFlag` "e") $
@@ -683,6 +690,7 @@ checkPrintfVar = CommandCheck (Exactly "printf") (f . arguments) where
             let formats = getPrintfFormats string
             let formatCount = length formats
             let argCount = length more
+            let pluraliseIfMany word n = if n > 1 then word ++ "s" else word
 
             return $ if
                 | argCount == 0 && formatCount == 0 ->
@@ -698,7 +706,8 @@ checkPrintfVar = CommandCheck (Exactly "printf") (f . arguments) where
                     return () -- Great: a suitable number of arguments
                 | otherwise ->
                     warn (getId format) 2183 $
-                        "This format string has " ++ show formatCount ++ " variables, but is passed " ++ show argCount ++ " arguments."
+                        "This format string has " ++ show formatCount ++ " " ++ pluraliseIfMany "variable" formatCount ++
+                        ", but is passed " ++ show argCount ++ pluraliseIfMany " argument" argCount ++ "."
 
         unless ('%' `elem` concat (oversimplify format) || isLiteral format) $
           info (getId format) 2059

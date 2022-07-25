@@ -206,6 +206,8 @@ nodeChecks = [
     ,checkCommandIsUnreachable
     ,checkSpacefulnessCfg
     ,checkOverwrittenExitCode
+    ,checkUnnecessaryArithmeticExpansionIndex
+    ,checkUnnecessaryParens
     ]
 
 optionalChecks = map fst optionalTreeChecks
@@ -3279,6 +3281,7 @@ checkReturnAgainstZero params token =
             _:next@(TA_Unary _ "!" _):_ -> isOnlyTestInCommand next
             _:next@(TC_Group {}):_ -> isOnlyTestInCommand next
             _:next@(TA_Sequence _ [_]):_ -> isOnlyTestInCommand next
+            _:next@(TA_Parentesis _ _):_ -> isOnlyTestInCommand next
             _ -> False
 
     -- TODO: Do better $? tracking and filter on whether
@@ -4911,6 +4914,54 @@ checkOverwrittenExitCode params t =
             Just "echo" -> True
             Just "printf" -> True
             _ -> False
+
+
+prop_checkUnnecessaryArithmeticExpansionIndex1 = verify checkUnnecessaryArithmeticExpansionIndex "a[$((1+1))]=n"
+prop_checkUnnecessaryArithmeticExpansionIndex2 = verifyNot checkUnnecessaryArithmeticExpansionIndex "a[1+1]=n"
+prop_checkUnnecessaryArithmeticExpansionIndex3 = verifyNot checkUnnecessaryArithmeticExpansionIndex "a[$(echo $((1+1)))]=n"
+checkUnnecessaryArithmeticExpansionIndex params t =
+    case t of
+        T_Assignment _ mode var [TA_Sequence _ [ TA_Expansion _ [expansion@(T_DollarArithmetic id _)]]] val ->
+            styleWithFix id 2321 "Array indices are already arithmetic contexts. Prefer removing the $(( and ))." $ fix id
+        _ -> return ()
+
+  where
+    fix id =
+        fixWith [
+            replaceStart id params 3 "", -- Remove "$(("
+            replaceEnd id params 2 ""    -- Remove "))"
+        ]
+
+
+prop_checkUnnecessaryParens1 = verify checkUnnecessaryParens "echo $(( ((1+1)) ))"
+prop_checkUnnecessaryParens2 = verify checkUnnecessaryParens "x[((1+1))+1]=1"
+prop_checkUnnecessaryParens3 = verify checkUnnecessaryParens "x[(1+1)]=1"
+prop_checkUnnecessaryParens4 = verify checkUnnecessaryParens "$(( (x) ))"
+prop_checkUnnecessaryParens5 = verify checkUnnecessaryParens "(( (x) ))"
+prop_checkUnnecessaryParens6 = verifyNot checkUnnecessaryParens "x[(1+1)+1]=1"
+prop_checkUnnecessaryParens7 = verifyNot checkUnnecessaryParens "(( (1*1)+1 ))"
+prop_checkUnnecessaryParens8 = verifyNot checkUnnecessaryParens "(( (1)+1 ))"
+checkUnnecessaryParens params t =
+    case t of
+        T_DollarArithmetic _ t -> checkLeading "$(( (x) )) is the same as $(( x ))" t
+        T_ForArithmetic _ x y z _ -> mapM_ (checkLeading "for (((x); (y); (z))) is the same as for ((x; y; z))")  [x,y,z]
+        T_Assignment _ _ _ [t] _ -> checkLeading "a[(x)] is the same as a[x]" t
+        T_Arithmetic _ t -> checkLeading "(( (x) )) is the same as (( x ))" t
+        TA_Parentesis _ (TA_Sequence _ [ TA_Parentesis id _ ]) ->
+            styleWithFix id 2322 "In arithmetic contexts, ((x)) is the same as (x). Prefer only one layer of parentheses." $ fix id
+        _ -> return ()
+  where
+
+    checkLeading str t =
+        case t of
+            TA_Sequence _ [TA_Parentesis id _ ] -> styleWithFix id 2323 (str ++ ". Prefer not wrapping in additional parentheses.") $ fix id
+            _ -> return ()
+
+    fix id =
+        fixWith [
+            replaceStart id params 1 "", -- Remove "("
+            replaceEnd id params 1 ""    -- Remove ")"
+        ]
 
 
 return []
