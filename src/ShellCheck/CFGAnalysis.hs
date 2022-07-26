@@ -56,6 +56,7 @@ module ShellCheck.CFGAnalysis (
     ,SpaceStatus (..)
     ,getIncomingState
     ,getOutgoingState
+    ,doesPostDominate
     ,ShellCheck.CFGAnalysis.runTests -- STRIP
     ) where
 
@@ -99,6 +100,7 @@ data CFGAnalysis = CFGAnalysis {
     graph :: CFGraph,
     tokenToRange :: M.Map Id (Node, Node),
     tokenToNodes :: M.Map Id (S.Set Node),
+    postDominators :: M.Map Node (S.Set Node),
     nodeToData :: M.Map Node (ProgramState, ProgramState)
 } deriving (Show, Generic, NFData)
 
@@ -138,6 +140,15 @@ getOutgoingState :: CFGAnalysis -> Id -> Maybe ProgramState
 getOutgoingState analysis id = do
     (start,end) <- M.lookup id $ tokenToRange analysis
     snd <$> M.lookup end (nodeToData analysis)
+
+-- Conveniently determine whether one node postdominates another,
+-- i.e. whether 'target' always unconditionally runs after 'base'.
+doesPostDominate :: CFGAnalysis -> Id -> Id -> Bool
+doesPostDominate analysis target base = fromMaybe False $ do
+    (_, baseEnd) <- M.lookup base $ tokenToRange analysis
+    (targetStart, _) <- M.lookup target $ tokenToRange analysis
+    postDoms <- M.lookup baseEnd $ postDominators analysis
+    return $ S.member targetStart postDoms
 
 getDataForNode analysis node = M.lookup node $ nodeToData analysis
 
@@ -1304,7 +1315,8 @@ analyzeControlFlow params t =
             graph = cfGraph cfg,
             tokenToRange = cfIdToRange cfg,
             tokenToNodes = cfIdToNodes cfg,
-            nodeToData = nodeToData
+            nodeToData = nodeToData,
+            postDominators = cfPostDominators cfg
         }
 
 
@@ -1353,6 +1365,7 @@ analyzeStragglers ctx state stragglers = do
         writeSTRef (cOutput ctx) state
         writeSTRef (cNode ctx) entry
         transferFunctionValue ctx def
+
 
 
 return []
