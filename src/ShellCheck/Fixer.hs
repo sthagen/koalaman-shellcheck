@@ -36,7 +36,7 @@ class Ranged a where
     end     :: a -> Position
     overlap :: a -> a -> Bool
     overlap x y =
-        (yStart >= xStart && yStart < xEnd) || (yStart < xStart && yEnd > xStart)
+        xEnd > yStart && yEnd > xStart
         where
             yStart = start y
             yEnd = end y
@@ -87,6 +87,7 @@ instance Ranged Replacement where
 instance Monoid Fix where
     mempty = newFix
     mappend = (<>)
+    mconcat = foldl mappend mempty -- fold left to right since <> discards right on overlap
 
 instance Semigroup Fix where
     f1 <> f2 =
