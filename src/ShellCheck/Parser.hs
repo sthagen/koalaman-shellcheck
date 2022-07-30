@@ -38,7 +38,6 @@ import Data.Functor
 import Data.List (isPrefixOf, isInfixOf, isSuffixOf, partition, sortBy, intercalate, nub, find)
 import Data.Maybe
 import Data.Monoid
-import Debug.Trace -- STRIP
 import GHC.Exts (sortWith)
 import Prelude hiding (readList)
 import System.IO
@@ -458,8 +457,8 @@ called s p = do
     pos <- getPosition
     withContext (ContextName pos s) p
 
-withAnnotations anns =
-    withContext (ContextAnnotation anns)
+withAnnotations anns p =
+    if null anns then p else withContext (ContextAnnotation anns) p
 
 readConditionContents single =
     readCondContents `attempting` lookAhead (do
@@ -992,6 +991,10 @@ prop_readAnnotation5 = isOk readAnnotation "# shellcheck disable=SC2002 # All ca
 prop_readAnnotation6 = isOk readAnnotation "# shellcheck disable=SC1234 # shellcheck foo=bar\n"
 prop_readAnnotation7 = isOk readAnnotation "# shellcheck disable=SC1000,SC2000-SC3000,SC1001\n"
 prop_readAnnotation8 = isOk readAnnotation "# shellcheck disable=all\n"
+prop_readAnnotation9 = isOk readAnnotation "# shellcheck source='foo bar' source-path=\"baz etc\"\n"
+prop_readAnnotation10 = isOk readAnnotation "# shellcheck disable='SC1234,SC2345' enable=\"foo\" shell='bash'\n"
+prop_readAnnotation11 = isOk (readAnnotationWithoutPrefix False) "external-sources='true'"
+
 readAnnotation = called "shellcheck directive" $ do
     try readAnnotationPrefix
     many1 linewhitespace
@@ -1007,12 +1010,19 @@ readAnnotationWithoutPrefix sandboxed = do
     many linewhitespace
     return $ concat values
   where
+    plainOrQuoted p = quoted p <|> p
+    quoted p = do
+        c <- oneOf "'\""
+        start <- getPosition
+        str <- many1 $ noneOf (c:"\n")
+        char c <|> fail "Missing terminating quote for directive."
+        subParse start p str
     readKey = do
         keyPos <- getPosition
         key <- many1 (letter <|> char '-')
         char '=' <|> fail "Expected '=' after directive key"
         annotations <- case key of
-            "disable" -> readElement `sepBy` char ','
+            "disable" -> plainOrQuoted $ readElement `sepBy` char ','
               where
                 readElement = readRange <|> readAll
                 readAll = do
@@ -1027,21 +1037,21 @@ readAnnotationWithoutPrefix sandboxed = do
                     int <- many1 digit
                     return $ read int
 
-            "enable" -> readName `sepBy` char ','
+            "enable" -> plainOrQuoted $ readName `sepBy` char ','
               where
                 readName = EnableComment <$> many1 (letter <|> char '-')
 
             "source" -> do
-                filename <- many1 $ noneOf " \n"
+                filename <- quoted (many1 anyChar) <|> (many1 $ noneOf " \n")
                 return [SourceOverride filename]
 
             "source-path" -> do
-                dirname <- many1 $ noneOf " \n"
+                dirname <- quoted (many1 anyChar) <|> (many1 $ noneOf " \n")
                 return [SourcePath dirname]
 
             "shell" -> do
                 pos <- getPosition
-                shell <- many1 $ noneOf " \n"
+                shell <- quoted (many1 anyChar) <|> (many1 $ noneOf " \n")
                 when (isNothing $ shellForExecutable shell) $
                     parseNoteAt pos ErrorC 1103
                         "This shell type is unknown. Use e.g. sh or bash."
@@ -1049,7 +1059,7 @@ readAnnotationWithoutPrefix sandboxed = do
 
             "external-sources" -> do
                 pos <- getPosition
-                value <- many1 letter
+                value <- plainOrQuoted $ many1 letter
                 case value of
                     "true" ->
                         if sandboxed
@@ -3247,44 +3257,51 @@ prop_readScript3 = isWarning readScript "#!/bin/bash\necho hello\xA0world"
 prop_readScript4 = isWarning readScript "#!/usr/bin/perl\nfoo=("
 prop_readScript5 = isOk readScript "#!/bin/bash\n#This is an empty script\n\n"
 prop_readScript6 = isOk readScript "#!/usr/bin/env -S X=FOO bash\n#This is an empty script\n\n"
+prop_readScript7 = isOk readScript "#!/bin/zsh\n# shellcheck disable=SC1071\nfor f (a b); echo $f\n"
 readScriptFile sourced = do
     start <- startSpan
     pos <- getPosition
-    optional $ do
-        readUtf8Bom
-        parseProblem ErrorC 1082
-            "This file has a UTF-8 BOM. Remove it with: LC_CTYPE=C sed '1s/^...//' < yourscript ."
-    shebang <- readShebang <|> readEmptyLiteral
-    let (T_Literal _ shebangString) = shebang
-    allspacing
-    annotationStart <- startSpan
-    fileAnnotations <- readAnnotations
     rcAnnotations <- if sourced
                      then return []
                      else do
                         filename <- Mr.asks currentFilename
                         readConfigFile filename
-    let annotations = fileAnnotations ++ rcAnnotations
-    annotationId <- endSpan annotationStart
-    let shellAnnotationSpecified =
-            any (\x -> case x of ShellOverride {} -> True; _ -> False) annotations
-    shellFlagSpecified <- isJust <$> Mr.asks shellTypeOverride
-    let ignoreShebang = shellAnnotationSpecified || shellFlagSpecified
 
-    unless ignoreShebang $
-        verifyShebang pos (executableFromShebang shebangString)
-    if ignoreShebang || isValidShell (executableFromShebang shebangString) /= Just False
-      then do
-            commands <- withAnnotations annotations readCompoundListOrEmpty
-            id <- endSpan start
-            verifyEof
-            let script = T_Annotation annotationId annotations $
-                            T_Script id shebang commands
-            reparseIndices script
-        else do
-            many anyChar
-            id <- endSpan start
-            return $ T_Script id shebang []
+    -- Put the rc annotations on the stack so that one can ignore e.g. SC1084 in .shellcheckrc
+    withAnnotations rcAnnotations $ do
+        hasBom <- wasIncluded readUtf8Bom
+        shebang <- readShebang <|> readEmptyLiteral
+        let (T_Literal _ shebangString) = shebang
+        allspacing
+        annotationStart <- startSpan
+        fileAnnotations <- readAnnotations
+
+        -- Similarly put the filewide annotations on the stack to allow earlier suppression
+        withAnnotations fileAnnotations $ do
+            when (hasBom) $
+                parseProblemAt pos ErrorC 1082
+                    "This file has a UTF-8 BOM. Remove it with: LC_CTYPE=C sed '1s/^...//' < yourscript ."
+            let annotations = fileAnnotations ++ rcAnnotations
+            annotationId <- endSpan annotationStart
+            let shellAnnotationSpecified =
+                    any (\x -> case x of ShellOverride {} -> True; _ -> False) annotations
+            shellFlagSpecified <- isJust <$> Mr.asks shellTypeOverride
+            let ignoreShebang = shellAnnotationSpecified || shellFlagSpecified
+
+            unless ignoreShebang $
+                verifyShebang pos (executableFromShebang shebangString)
+            if ignoreShebang || isValidShell (executableFromShebang shebangString) /= Just False
+              then do
+                    commands <- readCompoundListOrEmpty
+                    id <- endSpan start
+                    verifyEof
+                    let script = T_Annotation annotationId annotations $
+                                    T_Script id shebang commands
+                    reparseIndices script
+                else do
+                    many anyChar
+                    id <- endSpan start
+                    return $ T_Script id shebang []
 
   where
     verifyShebang pos s = do
@@ -3376,16 +3393,6 @@ parsesCleanly parser string = runIdentity $ do
         (Right userState, systemState) ->
             return $ Just . null $ parseNotes userState ++ parseProblems systemState
         (Left _, _) -> return Nothing
-
--- For printf debugging: print the value of an expression
--- Example: return $ dump $ T_Literal id [c]
-dump :: Show a => a -> a     -- STRIP
-dump x = trace (show x) x    -- STRIP
-
--- Like above, but print a specific expression:
--- Example: return $ dumps ("Returning: " ++ [c])  $ T_Literal id [c]
-dumps :: Show x => x -> a -> a -- STRIP
-dumps t = trace (show t)       -- STRIP
 
 parseWithNotes parser = do
     item <- parser

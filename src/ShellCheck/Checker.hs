@@ -20,9 +20,10 @@
 {-# LANGUAGE TemplateHaskell #-}
 module ShellCheck.Checker (checkScript, ShellCheck.Checker.runTests) where
 
+import ShellCheck.Analyzer
+import ShellCheck.ASTLib
 import ShellCheck.Interface
 import ShellCheck.Parser
-import ShellCheck.Analyzer
 
 import Data.Either
 import Data.Functor
@@ -85,7 +86,7 @@ checkScript sys spec = do
                     asCheckSourced = csCheckSourced spec,
                     asExecutionMode = Executed,
                     asTokenPositions = tokenPositions,
-                    asOptionalChecks = csOptionalChecks spec
+                    asOptionalChecks = getEnableDirectives root ++ csOptionalChecks spec
                 } where as = newAnalysisSpec root
         let analysisMessages =
                 maybe []
@@ -242,6 +243,9 @@ prop_canStripPrefixAndSource2 =
 
 prop_canSourceDynamicWhenRedirected =
     null $ checkWithIncludes [("lib", "")] "#shellcheck source=lib\n. \"$1\""
+
+prop_canRedirectWithSpaces =
+    null $ checkWithIncludes [("my file", "")] "#shellcheck source=\"my file\"\n. \"$1\""
 
 prop_recursiveAnalysis =
     [2086] == checkRecursive [("lib", "echo $1")] "source lib"
@@ -412,6 +416,15 @@ prop_sourcePathAddsAnnotation = result == [2086]
         csCheckSourced = True
     }
 
+prop_sourcePathWorksWithSpaces = result == [2086]
+  where
+    f "dir/myscript" _ ["my path"] "lib" = return "foo/lib"
+    result = checkWithIncludesAndSourcePath [("foo/lib", "echo $1")] f emptyCheckSpec {
+        csScript = "#!/bin/bash\n# shellcheck source-path='my path'\nsource lib",
+        csFilename = "dir/myscript",
+        csCheckSourced = True
+    }
+
 prop_sourcePathRedirectsDirective = result == [2086]
   where
     f "dir/myscript" _ _ "lib" = return "foo/lib"
@@ -483,6 +496,17 @@ prop_fileCannotEnableExternalSources2 = result == [1144]
         csCheckSourced = True
     }
 
+prop_rcCanSuppressEarlyProblems1 = null result
+  where
+    result = checkWithRc "disable=1071" emptyCheckSpec {
+        csScript = "#!/bin/zsh\necho $1"
+    }
+
+prop_rcCanSuppressEarlyProblems2 = null result
+  where
+    result = checkWithRc "disable=1104" emptyCheckSpec {
+        csScript = "!/bin/bash\necho 'hello world'"
+    }
 
 return []
 runTests = $quickCheckAll
