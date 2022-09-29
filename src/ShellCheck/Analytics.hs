@@ -807,6 +807,7 @@ prop_checkRedirectToSame6 = verifyNot checkRedirectToSame "echo foo > foo"
 prop_checkRedirectToSame7 = verifyNot checkRedirectToSame "sed 's/foo/bar/g' file | sponge file"
 prop_checkRedirectToSame8 = verifyNot checkRedirectToSame "while read -r line; do _=\"$fname\"; done <\"$fname\""
 prop_checkRedirectToSame9 = verifyNot checkRedirectToSame "while read -r line; do cat < \"$fname\"; done <\"$fname\""
+prop_checkRedirectToSame10 = verifyNot checkRedirectToSame "mapfile -t foo <foo"
 checkRedirectToSame params s@(T_Pipeline _ _ list) =
     mapM_ (\l -> (mapM_ (\x -> doAnalysis (checkOccurrences x) l) (getAllRedirs list))) list
   where
@@ -852,7 +853,7 @@ checkRedirectToSame params s@(T_Pipeline _ _ list) =
     isHarmlessCommand arg = fromMaybe False $ do
         cmd <- getClosestCommand (parentMap params) arg
         name <- getCommandBasename cmd
-        return $ name `elem` ["echo", "printf", "sponge"]
+        return $ name `elem` ["echo", "mapfile", "printf", "sponge"]
     containsAssignment arg = fromMaybe False $ do
         cmd <- getClosestCommand (parentMap params) arg
         return $ isAssignment cmd
@@ -2099,6 +2100,8 @@ prop_checkSpacefulnessCfg61 = verify checkSpacefulnessCfg "declare -x X; y=foo$X
 prop_checkSpacefulnessCfg62 = verifyNot checkSpacefulnessCfg "f() { declare -x X; y=foo$X; echo $y; }"
 prop_checkSpacefulnessCfg63 = verify checkSpacefulnessCfg "f && declare -i s; s='x + y'; echo $s"
 prop_checkSpacefulnessCfg64 = verifyNot checkSpacefulnessCfg "declare -i s; s='x + y'; x=$s; echo $x"
+prop_checkSpacefulnessCfg65 = verifyNot checkSpacefulnessCfg "f() { s=$?; echo $s; }; f"
+prop_checkSpacefulnessCfg66 = verifyNot checkSpacefulnessCfg "f() { s=$?; echo $s; }"
 
 checkSpacefulnessCfg = checkSpacefulnessCfg' True
 checkVerboseSpacefulnessCfg = checkSpacefulnessCfg' False
@@ -4684,6 +4687,7 @@ prop_checkSetESuppressed15 = verifyTree    checkSetESuppressed "set -e; f(){ :; 
 prop_checkSetESuppressed16 = verifyTree    checkSetESuppressed "set -e; f(){ :; }; until set -e; f; do :; done"
 prop_checkSetESuppressed17 = verifyNotTree checkSetESuppressed "set -e; f(){ :; }; g(){ :; }; g f"
 prop_checkSetESuppressed18 = verifyNotTree checkSetESuppressed "set -e; shopt -s inherit_errexit; f(){ :; }; x=$(f)"
+prop_checkSetESuppressed19 = verifyNotTree checkSetESuppressed "set -e; set -o posix; f(){ :; }; x=$(f)"
 checkSetESuppressed params t =
     if hasSetE params then runNodeAnalysis checkNode params t else []
   where
