@@ -550,6 +550,7 @@ prop_checkPipePitfalls19 = verifyNot checkPipePitfalls "foo | grep -A2 bar | wc 
 prop_checkPipePitfalls20 = verifyNot checkPipePitfalls "foo | grep -B999 bar | wc -l"
 prop_checkPipePitfalls21 = verifyNot checkPipePitfalls "foo | grep --after-context 999 bar | wc -l"
 prop_checkPipePitfalls22 = verifyNot checkPipePitfalls "foo | grep -B 1 --after-context 999 bar | wc -l"
+prop_checkPipePitfalls23 = verifyNot checkPipePitfalls "ps -o pid,args -p $(pgrep java) | grep -F net.shellcheck.Test"
 checkPipePitfalls _ (T_Pipeline id _ commands) = do
     for ["find", "xargs"] $
         \(find:xargs:_) ->
@@ -563,8 +564,15 @@ checkPipePitfalls _ (T_Pipeline id _ commands) = do
               ]) $ warn (getId find) 2038
                       "Use -print0/-0 or -exec + to allow for non-alphanumeric filenames."
 
-    for' ["ps", "grep"] $
-        \x -> info x 2009 "Consider using pgrep instead of grepping ps output."
+    for ["ps", "grep"] $
+        \(ps:grep:_) ->
+            let
+                psFlags = maybe [] (map snd . getAllFlags) $ getCommand ps
+            in
+                -- There are many ways to specify a pid: 1, -1, p 1, wup 1, -q 1, -p 1, --pid 1.
+                -- For simplicity we only deal with the most canonical looking flags:
+                unless (any (`elem` ["p", "pid", "q", "quick-pid"]) psFlags) $
+                    info (getId ps) 2009 "Consider using pgrep instead of grepping ps output."
 
     for ["grep", "wc"] $
         \(grep:wc:_) ->
@@ -782,6 +790,7 @@ prop_checkUnquotedExpansions7 = verifyNot checkUnquotedExpansions "cat << foo\n$
 prop_checkUnquotedExpansions8 = verifyNot checkUnquotedExpansions "set -- $(seq 1 4)"
 prop_checkUnquotedExpansions9 = verifyNot checkUnquotedExpansions "echo foo `# inline comment`"
 prop_checkUnquotedExpansions10 = verify checkUnquotedExpansions "#!/bin/sh\nexport var=$(val)"
+prop_checkUnquotedExpansions11 = verifyNot checkUnquotedExpansions "ps -p $(pgrep foo)"
 checkUnquotedExpansions params =
     check
   where
@@ -795,7 +804,7 @@ checkUnquotedExpansions params =
             warn (getId t) 2046 "Quote this to prevent word splitting."
 
     shouldBeSplit t =
-        getCommandNameFromExpansion t == Just "seq"
+        getCommandNameFromExpansion t `elem` [Just "seq", Just "pgrep"]
 
 
 prop_checkRedirectToSame = verify checkRedirectToSame "cat foo > foo"
@@ -3575,7 +3584,6 @@ prop_checkPipeToNowhere4 = verify checkPipeToNowhere "printf 'Lol' << eof\nlol\n
 prop_checkPipeToNowhere5 = verifyNot checkPipeToNowhere "echo foo | xargs du"
 prop_checkPipeToNowhere6 = verifyNot checkPipeToNowhere "ls | echo $(cat)"
 prop_checkPipeToNowhere7 = verifyNot checkPipeToNowhere "echo foo | var=$(cat) ls"
-prop_checkPipeToNowhere8 = verify checkPipeToNowhere "foo | true"
 prop_checkPipeToNowhere9 = verifyNot checkPipeToNowhere "mv -i f . < /dev/stdin"
 prop_checkPipeToNowhere10 = verify checkPipeToNowhere "ls > file | grep foo"
 prop_checkPipeToNowhere11 = verify checkPipeToNowhere "ls | grep foo < file"
@@ -4765,8 +4773,12 @@ prop_checkExtraMaskedReturns32 = verifyNotTree checkExtraMaskedReturns "false < 
 prop_checkExtraMaskedReturns33 = verifyNotTree checkExtraMaskedReturns "{ false || true; } | true"
 prop_checkExtraMaskedReturns34 = verifyNotTree checkExtraMaskedReturns "{ false || :; } | true"
 prop_checkExtraMaskedReturns35 = verifyTree checkExtraMaskedReturns "f() { local -r x=$(false); }"
+prop_checkExtraMaskedReturns36 = verifyNotTree checkExtraMaskedReturns "time false"
+prop_checkExtraMaskedReturns37 = verifyNotTree checkExtraMaskedReturns "time $(time false)"
+prop_checkExtraMaskedReturns38 = verifyTree checkExtraMaskedReturns "x=$(time time time false) time $(time false)"
 
-checkExtraMaskedReturns params t = runNodeAnalysis findMaskingNodes params t
+checkExtraMaskedReturns params t =
+    runNodeAnalysis findMaskingNodes params (removeTransparentCommands t)
   where
     findMaskingNodes _ (T_Arithmetic _ list) = findMaskedNodesInList [list]
     findMaskingNodes _ (T_Array _ list) = findMaskedNodesInList $ allButLastSimpleCommands list
@@ -4799,6 +4811,13 @@ checkExtraMaskedReturns params t = runNodeAnalysis findMaskingNodes params t
       where
         simpleCommands = filter containsSimpleCommand cmds
 
+    removeTransparentCommands t =
+        doTransform go t
+      where
+        go cmd@(T_SimpleCommand id assigns (_:args)) | isTransparentCommand cmd
+          = T_SimpleCommand id assigns args
+        go t = t
+
     inform t = info (getId t) 2312 ("Consider invoking this command "
         ++ "separately to avoid masking its return value (or use '|| true' "
         ++ "to ignore).")
@@ -4830,6 +4849,10 @@ checkExtraMaskedReturns params t = runNodeAnalysis findMaskingNodes params t
             ,"set"
             ,"shopt"
             ]
+
+    isTransparentCommand t = fromMaybe False $ do
+        basename <- getCommandBasename t
+        return $ basename == "time"
 
     parentChildPairs t = go $ parents params t
       where
