@@ -20,6 +20,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE DeriveAnyClass, DeriveGeneric #-}
+{-# LANGUAGE CPP #-}
 
 {-
     Data Flow Analysis on a Control Flow Graph.
@@ -433,6 +434,13 @@ data StackEntry s = StackEntry {
 }
     deriving (Eq, Generic, NFData)
 
+#if MIN_VERSION_deepseq(1,4,2)
+-- Our deepseq already has a STRef instance
+#else
+-- Older deepseq (for GHC < 8) lacks this instance
+instance NFData (STRef s a) where
+    rnf = (`seq` ())
+#endif
 
 -- Overwrite a base state with the contents of a diff state
 -- This is unrelated to join/merge.
@@ -1391,7 +1399,7 @@ analyzeControlFlow params t =
     getFunctionTargets :: InternalState -> M.Map Node FunctionDefinition
     getFunctionTargets state =
         let
-            declaredFuncs = S.unions $ mapStorage $ sFunctionTargets state
+            declaredFuncs = S.unions $ M.elems $ mapStorage $ sFunctionTargets state
             getFunc d =
                 case d of
                     FunctionDefinition _ entry _ -> Just (entry, d)
