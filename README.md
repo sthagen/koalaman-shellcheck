@@ -112,6 +112,7 @@ Services and platforms that have ShellCheck pre-installed and ready to use:
 * [Code Factor](https://www.codefactor.io/)
 * [CircleCI](https://circleci.com) via the [ShellCheck Orb](https://circleci.com/orbs/registry/orb/circleci/shellcheck)
 * [Github](https://github.com/features/actions) (only Linux)
+* [Trunk Check](https://trunk.io/products/check) (universal linter; [allows you to explicitly version your shellcheck install](https://github.com/trunk-io/plugins/blob/bcbb361dcdbe4619af51ea7db474d7fb87540d20/.trunk/trunk.yaml#L32)) via the [shellcheck plugin](https://github.com/trunk-io/plugins/blob/main/linters/shellcheck/plugin.yaml)
 
 Most other services, including [GitLab](https://about.gitlab.com/), let you install
 ShellCheck yourself, either through the system's package manager (see [Installing](#installing)),
@@ -231,6 +232,9 @@ Alternatively, you can download pre-compiled binaries for the latest release her
 
 or see the [GitHub Releases](https://github.com/koalaman/shellcheck/releases) for other releases
 (including the [latest](https://github.com/koalaman/shellcheck/releases/tag/latest) meta-release for daily git builds).
+
+There are currently no official binaries for Apple Silicon, but third party builds are available via
+[ShellCheck for Visual Studio Code](https://github.com/vscode-shellcheck/shellcheck-binaries/releases).
 
 Distro packages already come with a `man` page. If you are building from source, it can be installed with:
 
