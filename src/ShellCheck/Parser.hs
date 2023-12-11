@@ -3339,7 +3339,8 @@ readScriptFile sourced = do
                     verifyEof
                     let script = T_Annotation annotationId annotations $
                                     T_Script id shebang commands
-                    reparseIndices script
+                    userstate <- getState
+                    reparseIndices $ reattachHereDocs script (hereDocMap userstate)
                 else do
                     many anyChar
                     id <- endSpan start
@@ -3349,8 +3350,8 @@ readScriptFile sourced = do
     verifyShebang pos s = do
         case isValidShell s of
             Just True -> return ()
-            Just False -> parseProblemAt pos ErrorC 1071 "ShellCheck only supports sh/bash/dash/ksh scripts. Sorry!"
-            Nothing -> parseProblemAt pos ErrorC 1008 "This shebang was unrecognized. ShellCheck only supports sh/bash/dash/ksh. Add a 'shell' directive to specify."
+            Just False -> parseProblemAt pos ErrorC 1071 "ShellCheck only supports sh/bash/dash/ksh/'busybox sh' scripts. Sorry!"
+            Nothing -> parseProblemAt pos ErrorC 1008 "This shebang was unrecognized. ShellCheck only supports sh/bash/dash/ksh/'busybox sh'. Add a 'shell' directive to specify."
 
     isValidShell s =
         let good = null s || any (`isPrefixOf` s) goodShells
@@ -3366,6 +3367,7 @@ readScriptFile sourced = do
         "sh",
         "ash",
         "dash",
+        "busybox sh",
         "bash",
         "bats",
         "ksh"
@@ -3486,8 +3488,7 @@ parseShell env name contents = do
             return newParseResult {
                 prComments = map toPositionedComment $ nub $ parseNotes userstate ++ parseProblems state,
                 prTokenPositions = Map.map startEndPosToPos (positionMap userstate),
-                prRoot = Just $
-                    reattachHereDocs script (hereDocMap userstate)
+                prRoot = Just script
             }
         Left err -> do
             let context = contextStack state
