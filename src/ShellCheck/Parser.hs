@@ -46,6 +46,7 @@ import Text.Parsec.Error
 import Text.Parsec.Pos
 import qualified Control.Monad.Reader as Mr
 import qualified Control.Monad.State as Ms
+import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as Map
 
 import Test.QuickCheck.All (quickCheckAll)
@@ -160,7 +161,7 @@ data Context =
     deriving (Show)
 
 data HereDocContext =
-        HereDocPending Token [Context] -- on linefeed, read this T_HereDoc
+        HereDocPending Id Dashed Quoted String [Context] -- on linefeed, read this T_HereDoc
     deriving (Show)
 
 data UserState = UserState {
@@ -238,12 +239,12 @@ addToHereDocMap id list = do
         hereDocMap = Map.insert id list map
     }
 
-addPendingHereDoc t = do
+addPendingHereDoc id d q str = do
     state <- getState
     context <- getCurrentContexts
     let docs = pendingHereDocs state
     putState $ state {
-        pendingHereDocs = HereDocPending t context : docs
+        pendingHereDocs = HereDocPending id d q str context : docs
     }
 
 popPendingHereDocs = do
@@ -1835,7 +1836,7 @@ readHereDoc = called "here document" $ do
 
     -- add empty tokens for now, read the rest in readPendingHereDocs
     let doc = T_HereDoc hid dashed quoted endToken []
-    addPendingHereDoc doc
+    addPendingHereDoc hid dashed quoted endToken
     return doc
   where
     unquote :: String -> (Quoted, String)
@@ -1856,7 +1857,7 @@ readPendingHereDocs = do
     docs <- popPendingHereDocs
     mapM_ readDoc docs
   where
-    readDoc (HereDocPending (T_HereDoc id dashed quoted endToken _) ctx) =
+    readDoc (HereDocPending id dashed quoted endToken ctx) =
       swapContext ctx $
       do
         docStartPos <- getPosition
@@ -2904,8 +2905,8 @@ readLetSuffix = many1 (readIoRedirect <|> try readLetExpression <|> readCmdWord)
     kludgeAwayQuotes :: String -> SourcePos -> (String, SourcePos)
     kludgeAwayQuotes s p =
         case s of
-            first:rest@(_:_) ->
-                let (last:backwards) = reverse rest
+            first:second:rest ->
+                let (last NE.:| backwards) = NE.reverse (second NE.:| rest)
                     middle = reverse backwards
                 in
                     if first `elem` "'\"" && first == last
@@ -3506,13 +3507,11 @@ parseShell env name contents = do
     -- A final pass for ignoring parse errors after failed parsing
     isIgnored stack note = any (contextItemDisablesCode False (codeForParseNote note)) stack
 
-notesForContext list = zipWith ($) [first, second] $ filter isName list
+notesForContext list = zipWith ($) [first, second] [(pos, str) | ContextName pos str <- list]
   where
-    isName (ContextName _ _) = True
-    isName _ = False
-    first (ContextName pos str) = ParseNote pos pos ErrorC 1073 $
+    first (pos, str) = ParseNote pos pos ErrorC 1073 $
         "Couldn't parse this " ++ str ++ ". Fix to allow more checks."
-    second (ContextName pos str) = ParseNote pos pos InfoC 1009 $
+    second (pos, str) = ParseNote pos pos InfoC 1009 $
         "The mentioned syntax error was in this " ++ str ++ "."
 
 -- Go over all T_UnparsedIndex and reparse them as either arithmetic or text
