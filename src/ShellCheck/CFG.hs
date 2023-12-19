@@ -51,6 +51,7 @@ import Control.Monad.Identity
 import Data.Array.Unboxed
 import Data.Array.ST
 import Data.List hiding (map)
+import qualified Data.List.NonEmpty as NE
 import Data.Maybe
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -111,8 +112,8 @@ data CFEdge =
 
 -- Actions we track
 data CFEffect =
-    CFSetProps Scope String (S.Set CFVariableProp)
-    | CFUnsetProps Scope String (S.Set CFVariableProp)
+    CFSetProps (Maybe Scope) String (S.Set CFVariableProp)
+    | CFUnsetProps (Maybe Scope) String (S.Set CFVariableProp)
     | CFReadVariable String
     | CFWriteVariable String CFValue
     | CFWriteGlobal String CFValue
@@ -578,7 +579,7 @@ build t = do
 
         T_Array _ list -> sequentially list
 
-        T_Assignment {} -> buildAssignment DefaultScope t
+        T_Assignment {} -> buildAssignment Nothing t
 
         T_Backgrounded id body -> do
             start <- newStructuralNode
@@ -857,8 +858,8 @@ build t = do
             status <- newNodeRange (CFSetExitCode id)
             linkRange assignments status
 
-        T_SimpleCommand id vars list@(cmd:_) ->
-            handleCommand t vars list $ getUnquotedLiteral cmd
+        T_SimpleCommand id vars (cmd:args) ->
+            handleCommand t vars (cmd NE.:| args) $ getUnquotedLiteral cmd
 
         T_SingleQuoted _ _ -> none
 
@@ -925,8 +926,8 @@ handleCommand cmd vars args literalCmd = do
     -- TODO: Handle assignments in declaring commands
 
     case literalCmd of
-        Just "exit" -> regularExpansion vars args $ handleExit
-        Just "return" -> regularExpansion vars args $ handleReturn
+        Just "exit" -> regularExpansion vars (NE.toList args) $ handleExit
+        Just "return" -> regularExpansion vars (NE.toList args) $ handleReturn
         Just "unset" -> regularExpansionWithStatus vars args $ handleUnset args
 
         Just "declare" -> handleDeclare args
@@ -949,14 +950,14 @@ handleCommand cmd vars args literalCmd = do
         -- This will mostly behave like 'command' but ok
         Just "builtin" ->
             case args of
-                [_] -> regular
-                (_:newargs@(newcmd:_)) ->
-                    handleCommand newcmd vars newargs $ getLiteralString newcmd
+                _ NE.:| [] -> regular
+                (_ NE.:| newcmd:newargs) ->
+                    handleCommand newcmd vars (newcmd NE.:| newargs) $ getLiteralString newcmd
         Just "command" ->
             case args of
-                [_] -> regular
-                (_:newargs@(newcmd:_)) ->
-                    handleOthers (getId newcmd) vars newargs $ getLiteralString newcmd
+                _ NE.:| [] -> regular
+                (_ NE.:| newcmd:newargs) ->
+                    handleOthers (getId newcmd) vars (newcmd NE.:| newargs) $ getLiteralString newcmd
         _ -> regular
 
   where
@@ -984,7 +985,7 @@ handleCommand cmd vars args literalCmd = do
                 unreachable <- newNode CFUnreachable
                 return $ Range ret unreachable
 
-    handleUnset (cmd:args) = do
+    handleUnset (cmd NE.:| args) = do
         case () of
                 _ | "n" `elem` flagNames -> unsetWith CFUndefineNameref
                 _ | "v" `elem` flagNames -> unsetWith CFUndefineVariable
@@ -1003,7 +1004,7 @@ handleCommand cmd vars args literalCmd = do
 
     variableAssignRegex = mkRegex "^([_a-zA-Z][_a-zA-Z0-9]*)="
 
-    handleDeclare (cmd:args) = do
+    handleDeclare (cmd NE.:| args) = do
         isFunc <- asks cfIsFunction
         -- This is a bit of a kludge: we don't have great support for things like
         -- 'declare -i x=$x' so do one round with declare x=$x, followed by declare -i x
@@ -1030,9 +1031,9 @@ handleCommand cmd vars args literalCmd = do
 
         scope isFunc =
             case () of
-                _ | global -> GlobalScope
-                _ | isFunc -> LocalScope
-                _ -> DefaultScope
+                _ | global -> Just GlobalScope
+                _ | isFunc -> Just LocalScope
+                _ -> Nothing
 
         addedProps = S.fromList $ concat $ [
             [ CFVPArray | array ],
@@ -1092,7 +1093,7 @@ handleCommand cmd vars args literalCmd = do
             in
                 concatMap (drop 1) plusses
 
-    handlePrintf (cmd:args) =
+    handlePrintf (cmd NE.:| args) =
         newNodeRange $ CFApplyEffects $ maybeToList findVar
       where
         findVar = do
@@ -1101,7 +1102,7 @@ handleCommand cmd vars args literalCmd = do
             name <- getLiteralString arg
             return $ IdTagged (getId arg) $ CFWriteVariable name CFValueString
 
-    handleWait (cmd:args) =
+    handleWait (cmd NE.:| args) =
         newNodeRange $ CFApplyEffects $ maybeToList findVar
       where
         findVar = do
@@ -1110,7 +1111,7 @@ handleCommand cmd vars args literalCmd = do
             name <- getLiteralString arg
             return $ IdTagged (getId arg) $ CFWriteVariable name CFValueInteger
 
-    handleMapfile (cmd:args) =
+    handleMapfile (cmd NE.:| args) =
         newNodeRange $ CFApplyEffects [findVar]
       where
         findVar =
@@ -1130,7 +1131,7 @@ handleCommand cmd vars args literalCmd = do
             guard $ isVariableName name
             return (getId c, name)
 
-    handleRead (cmd:args) = newNodeRange $ CFApplyEffects main
+    handleRead (cmd NE.:| args) = newNodeRange $ CFApplyEffects main
       where
         main = fromMaybe fallback $ do
             flags <- getGnuOpts flagsForRead args
@@ -1160,7 +1161,7 @@ handleCommand cmd vars args literalCmd = do
             in
                 map (\(id, name) -> IdTagged id $ CFWriteVariable name value) namesOrDefault
 
-    handleDEFINE (cmd:args) =
+    handleDEFINE (cmd NE.:| args) =
         newNodeRange $ CFApplyEffects $ maybeToList findVar
       where
         findVar = do
@@ -1170,14 +1171,14 @@ handleCommand cmd vars args literalCmd = do
             return $ IdTagged (getId name) $ CFWriteVariable str CFValueString
 
     handleOthers id vars args cmd =
-        regularExpansion vars args $ do
+        regularExpansion vars (NE.toList args) $ do
             exe <- newNodeRange $ CFExecuteCommand cmd
             status <- newNodeRange $ CFSetExitCode id
             linkRange exe status
 
     regularExpansion vars args p = do
             args <- sequentially args
-            assignments <- mapM (buildAssignment PrefixScope) vars
+            assignments <- mapM (buildAssignment (Just PrefixScope)) vars
             exe <- p
             dropAssignments <-
                 if null vars
@@ -1189,15 +1190,15 @@ handleCommand cmd vars args literalCmd = do
 
             linkRanges $ [args] ++ assignments ++ [exe] ++ dropAssignments
 
-    regularExpansionWithStatus vars args@(cmd:_) p = do
-        initial <- regularExpansion vars args p
+    regularExpansionWithStatus vars args@(cmd NE.:| _) p = do
+        initial <- regularExpansion vars (NE.toList args) p
         status <- newNodeRange $ CFSetExitCode (getId cmd)
         linkRange initial status
 
 
 none = newStructuralNode
 
-data Scope = DefaultScope | GlobalScope | LocalScope | PrefixScope
+data Scope = GlobalScope | LocalScope | PrefixScope
   deriving (Eq, Ord, Show, Generic, NFData)
 
 buildAssignment scope t = do
@@ -1211,10 +1212,10 @@ buildAssignment scope t = do
                 let valueType = if null indices then f id value else CFValueArray
                 let scoper =
                                 case scope of
-                                    PrefixScope -> CFWritePrefix
-                                    LocalScope -> CFWriteLocal
-                                    GlobalScope -> CFWriteGlobal
-                                    DefaultScope -> CFWriteVariable
+                                    Just PrefixScope -> CFWritePrefix
+                                    Just LocalScope -> CFWriteLocal
+                                    Just GlobalScope -> CFWriteGlobal
+                                    Nothing -> CFWriteVariable
                 write <- newNodeRange $ applySingle $ IdTagged id $ scoper var valueType
                 linkRanges [expand, index, read, write]
               where
