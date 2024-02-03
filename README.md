@@ -77,7 +77,7 @@ You can see ShellCheck suggestions directly in a variety of editors.
 
 * Sublime, through [SublimeLinter](https://github.com/SublimeLinter/SublimeLinter-shellcheck).
 
-* Atom, through [Linter](https://github.com/AtomLinter/linter-shellcheck).
+* Pulsar Edit (former Atom), through [linter-shellcheck-pulsar](https://github.com/pulsar-cooperative/linter-shellcheck-pulsar).
 
 * VSCode, through [vscode-shellcheck](https://github.com/timonwong/vscode-shellcheck).
 
@@ -308,10 +308,6 @@ Verify that `cabal` is installed and update its dependency list with
 `git clone` this repository, and `cd` to the ShellCheck source directory to build/install:
 
     $ cabal install
-
-Or if you intend to run the tests:
-
-    $ cabal install --enable-tests
 
 This will compile ShellCheck and install it to your `~/.cabal/bin` directory.
 
@@ -558,4 +554,3 @@ Happy ShellChecking!
 
 * The wiki has [long form descriptions](https://github.com/koalaman/shellcheck/wiki/Checks) for each warning, e.g. [SC2221](https://github.com/koalaman/shellcheck/wiki/SC2221).
 * ShellCheck does not attempt to enforce any kind of formatting or indenting style, so also check out [shfmt](https://github.com/mvdan/sh)!
-
