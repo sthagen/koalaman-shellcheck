@@ -902,16 +902,6 @@ supportsArrays Bash = True
 supportsArrays Ksh = True
 supportsArrays _ = False
 
--- Returns true if the shell is Bash or Ksh (sorry for the name, Ksh)
-isBashLike :: Parameters -> Bool
-isBashLike params =
-    case shellType params of
-        Bash -> True
-        Ksh -> True
-        Dash -> False
-        BusyboxSh -> False
-        Sh -> False
-
 isTrueAssignmentSource c =
     case c of
         DataString SourceChecked -> False
@@ -929,6 +919,14 @@ modifiesVariable params token name =
             Assignment (_, _, n, source) -> isTrueAssignmentSource source && n == name
             _ -> False
 
+isTestCommand t =
+    case t of
+        T_Condition {} -> True
+        T_SimpleCommand {} -> t `isCommand` "test"
+        T_Redirecting _ _ t -> isTestCommand t
+        T_Annotation _ _ t -> isTestCommand t
+        T_Pipeline _ _ [t] -> isTestCommand t
+        _ -> False
 
 return []
 runTests =  $( [| $(forAllProperties) (quickCheckWithResult (stdArgs { maxSuccess = 1 }) ) |])

@@ -877,8 +877,9 @@ prop_checkShorthandIf5 = verifyNot checkShorthandIf "foo && rm || printf b"
 prop_checkShorthandIf6 = verifyNot checkShorthandIf "if foo && bar || baz; then true; fi"
 prop_checkShorthandIf7 = verifyNot checkShorthandIf "while foo && bar || baz; do true; done"
 prop_checkShorthandIf8 = verify checkShorthandIf "if true; then foo && bar || baz; fi"
-checkShorthandIf params x@(T_OrIf _ (T_AndIf id _ _) (T_Pipeline _ _ t))
-        | not (isOk t || inCondition) =
+prop_checkShorthandIf9 = verifyNot checkShorthandIf "foo && [ -x /file ] || bar"
+checkShorthandIf params x@(T_OrIf _ (T_AndIf id _ b) (T_Pipeline _ _ t))
+        | not (isOk t || inCondition) && not (isTestCommand b) =
     info id 2015 "Note that A && B || C is not if-then-else. C may run when A is true."
   where
     isOk [t] = isAssignment t || fromMaybe False (do
@@ -1524,6 +1525,7 @@ prop_checkComparisonAgainstGlob3 = verify checkComparisonAgainstGlob "[ $cow = *
 prop_checkComparisonAgainstGlob4 = verifyNot checkComparisonAgainstGlob "[ $cow = foo ]"
 prop_checkComparisonAgainstGlob5 = verify checkComparisonAgainstGlob "[[ $cow != $bar ]]"
 prop_checkComparisonAgainstGlob6 = verify checkComparisonAgainstGlob "[ $f != /* ]"
+prop_checkComparisonAgainstGlob7 = verify checkComparisonAgainstGlob "#!/bin/busybox sh\n[[ $f == *foo* ]]"
 checkComparisonAgainstGlob _ (TC_Binary _ DoubleBracket op _ (T_NormalWord id [T_DollarBraced _ _ _]))
     | op `elem` ["=", "==", "!="] =
         warn id 2053 $ "Quote the right-hand side of " ++ op ++ " in [[ ]] to prevent glob matching."
@@ -1531,9 +1533,13 @@ checkComparisonAgainstGlob params (TC_Binary _ SingleBracket op _ word)
         | op `elem` ["=", "==", "!="] && isGlob word =
     err (getId word) 2081 msg
   where
-    msg = if isBashLike params
+    msg = if (shellType params) `elem` [Bash, Ksh]  -- Busybox does not support glob matching
             then "[ .. ] can't match globs. Use [[ .. ]] or case statement."
             else "[ .. ] can't match globs. Use a case statement."
+
+checkComparisonAgainstGlob params (TC_Binary _ DoubleBracket op _ word)
+        | shellType params == BusyboxSh && op `elem` ["=", "==", "!="] && isGlob word =
+    err (getId word) 2330 "BusyBox [[ .. ]] does not support glob matching. Use a case statement."
 
 checkComparisonAgainstGlob _ _ = return ()
 
@@ -2446,6 +2452,7 @@ prop_checkUnassignedReferences_minusZDefault = verifyNotTree checkUnassignedRefe
 prop_checkUnassignedReferences50 = verifyNotTree checkUnassignedReferences "echo ${foo:+bar}"
 prop_checkUnassignedReferences51 = verifyNotTree checkUnassignedReferences "echo ${foo:+$foo}"
 prop_checkUnassignedReferences52 = verifyNotTree checkUnassignedReferences "wait -p pid; echo $pid"
+prop_checkUnassignedReferences53 = verifyTree checkUnassignedReferences "x=($foo)"
 
 checkUnassignedReferences = checkUnassignedReferences' False
 checkUnassignedReferences' includeGlobals params t = warnings
@@ -2501,14 +2508,12 @@ checkUnassignedReferences' includeGlobals params t = warnings
 
     warnings = execWriter . sequence $ mapMaybe warningFor unassigned
 
-    -- Due to parsing, foo=( [bar]=baz ) parses 'bar' as a reference even for assoc arrays.
-    -- Similarly, ${foo[bar baz]} may not be referencing bar/baz. Just skip these.
+    -- ${foo[bar baz]} may not be referencing bar/baz. Just skip these.
     -- We can also have ${foo:+$foo} should be treated like [[ -n $foo ]] && echo $foo
     isException var t = any shouldExclude $ getPath (parentMap params) t
       where
         shouldExclude t =
             case t of
-                T_Array {} -> True
                 (T_DollarBraced _ _ l) ->
                     let str = concat $ oversimplify l
                         ref = getBracedReference str
@@ -3999,6 +4004,7 @@ prop_checkUselessBang6 = verify checkUselessBang "set -e; { ! true; }"
 prop_checkUselessBang7 = verifyNot checkUselessBang "set -e; x() { ! [ x ]; }"
 prop_checkUselessBang8 = verifyNot checkUselessBang "set -e; if { ! true; }; then true; fi"
 prop_checkUselessBang9 = verifyNot checkUselessBang "set -e; while ! true; do true; done"
+prop_checkUselessBang10 = verify checkUselessBang "set -e\nshellcheck disable=SC0000\n! true\nrest"
 checkUselessBang params t = when (hasSetE params) $ mapM_ check (getNonReturningCommands t)
   where
     check t =
@@ -4007,6 +4013,7 @@ checkUselessBang params t = when (hasSetE params) $ mapM_ check (getNonReturning
                 addComment $ makeCommentWithFix InfoC id 2251
                         "This ! is not on a condition and skips errexit. Use `&& exit 1` instead, or make sure $? is checked."
                         (fixWith [replaceStart id params 1 "", replaceEnd (getId cmd) params 0 " && exit 1"])
+            T_Annotation _ _ t -> check t
             _ -> return ()
 
     -- Get all the subcommands that aren't likely to be the return value
@@ -4197,7 +4204,7 @@ checkBadTestAndOr params t =
         in
             mapM_ checkTest commandWithSeps
     checkTest (before, cmd, after) =
-        when (isTest cmd) $ do
+        when (isTestCommand cmd) $ do
             checkPipe before
             checkPipe after
 
@@ -4213,17 +4220,10 @@ checkBadTestAndOr params t =
             T_AndIf _ _ rhs -> checkAnds id rhs
             T_OrIf _ _ rhs -> checkAnds id rhs
             T_Pipeline _ _ list | not (null list) -> checkAnds id (last list)
-            cmd -> when (isTest cmd) $
+            cmd -> when (isTestCommand cmd) $
                 errWithFix id 2265 "Use && for logical AND. Single & will background and return true." $
                     (fixWith [replaceEnd id params 0 "&"])
 
-    isTest t =
-        case t of
-            T_Condition {} -> True
-            T_SimpleCommand {} -> t `isCommand` "test"
-            T_Redirecting _ _ t -> isTest t
-            T_Annotation _ _ t -> isTest t
-            _ -> False
 
 prop_checkComparisonWithLeadingX1 = verify checkComparisonWithLeadingX "[ x$foo = xlol ]"
 prop_checkComparisonWithLeadingX2 = verify checkComparisonWithLeadingX "test x$foo = xlol"
@@ -4539,13 +4539,13 @@ prop_checkRequireDoubleBracket2 = verifyTree checkRequireDoubleBracket "[ foo -o
 prop_checkRequireDoubleBracket3 = verifyNotTree checkRequireDoubleBracket "#!/bin/sh\n[ -x foo ]"
 prop_checkRequireDoubleBracket4 = verifyNotTree checkRequireDoubleBracket "[[ -x foo ]]"
 checkRequireDoubleBracket params =
-    if isBashLike params
+    if (shellType params) `elem` [Bash, Ksh, BusyboxSh]
     then nodeChecksToTreeCheck [check] params
     else const []
   where
     check _ t = case t of
         T_Condition id SingleBracket _ ->
-            styleWithFix id 2292 "Prefer [[ ]] over [ ] for tests in Bash/Ksh." (fixFor t)
+            styleWithFix id 2292 "Prefer [[ ]] over [ ] for tests in Bash/Ksh/Busybox." (fixFor t)
         _ -> return ()
 
     fixFor t = fixWith $
@@ -4896,16 +4896,33 @@ checkBatsTestDoesNotUseNegation params t =
 prop_checkCommandIsUnreachable1 = verify checkCommandIsUnreachable "foo; bar; exit; baz"
 prop_checkCommandIsUnreachable2 = verify checkCommandIsUnreachable "die() { exit; }; foo; bar; die; baz"
 prop_checkCommandIsUnreachable3 = verifyNot checkCommandIsUnreachable "foo; bar || exit; baz"
+prop_checkCommandIsUnreachable4 = verifyNot checkCommandIsUnreachable "f() { foo; };    # Maybe sourced"
+prop_checkCommandIsUnreachable5 = verify checkCommandIsUnreachable "f() { foo; }; exit  # Not sourced"
 checkCommandIsUnreachable params t =
     case t of
         T_Pipeline {} -> sequence_ $ do
             cfga <- cfgAnalysis params
-            state <- CF.getIncomingState cfga id
+            state <- CF.getIncomingState cfga (getId t)
             guard . not $ CF.stateIsReachable state
             guard . not $ isSourced params t
-            return $ info id 2317 "Command appears to be unreachable. Check usage (or ignore if invoked indirectly)."
+            guard . not $ any (\t -> isUnreachable t || isUnreachableFunction t) $ NE.drop 1 $ getPath (parentMap params) t
+            return $ info (getId t) 2317 "Command appears to be unreachable. Check usage (or ignore if invoked indirectly)."
+        T_Function id _ _ _ _ ->
+            when (isUnreachableFunction t
+                    && (not . any isUnreachableFunction . NE.drop 1 $ getPath (parentMap params) t)
+                    && (not $ isSourced params t)) $
+                info id 2329 "This function is never invoked. Check usage (or ignored if invoked indirectly)."
         _ -> return ()
-  where id = getId t
+  where
+    isUnreachableFunction :: Token -> Bool
+    isUnreachableFunction f =
+        case f of
+            T_Function id _ _ _ t -> isUnreachable t
+            _ -> False
+    isUnreachable t = fromMaybe False $ do
+        cfga <- cfgAnalysis params
+        state <- CF.getIncomingState cfga (getId t)
+        return . not $ CF.stateIsReachable state
 
 
 prop_checkOverwrittenExitCode1 = verify checkOverwrittenExitCode "x; [ $? -eq 1 ] || [ $? -eq 2 ]"
