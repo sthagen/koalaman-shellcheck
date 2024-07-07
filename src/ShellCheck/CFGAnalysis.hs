@@ -133,7 +133,7 @@ internalToExternal s =
             literalValue = Nothing
         }
     }
-    flatVars = M.unionsWith (\_ last -> last) $ map mapStorage [sGlobalValues s, sLocalValues s, sPrefixValues s]
+    flatVars = M.unions $ map mapStorage [sPrefixValues s, sLocalValues s, sGlobalValues s]
 
 -- Conveniently get the state before a token id
 getIncomingState :: CFGAnalysis -> Id -> Maybe ProgramState
@@ -672,7 +672,7 @@ vmPatch base diff =
         _ | vmIsQuickEqual base diff -> diff
         _ -> VersionedMap {
             mapVersion = -1,
-            mapStorage = M.unionWith (flip const) (mapStorage base) (mapStorage diff)
+            mapStorage = M.union (mapStorage diff) (mapStorage base)
         }
 
 -- Set a variable. This includes properties. Applies it to the appropriate scope.
@@ -1286,7 +1286,7 @@ dataflow ctx entry = do
             else do
                 let (next, rest) = S.deleteFindMin ps
                 nexts <- process states next
-                writeSTRef pending $ foldl (flip S.insert) rest nexts
+                writeSTRef pending $ S.union (S.fromList nexts) rest
                 f (n-1) pending states
 
     process states node = do
@@ -1350,7 +1350,7 @@ analyzeControlFlow params t =
 
         -- All nodes we've touched
         invocations <- readSTRef $ cInvocations ctx
-        let invokedNodes = M.fromDistinctAscList $ map (\c -> (c, ())) $ S.toList $ M.keysSet $ groupByNode $ M.map snd invocations
+        let invokedNodes = M.fromSet (const ()) $ S.unions $ map (M.keysSet . snd) $ M.elems invocations
 
         -- Invoke all functions that were declared but not invoked
         -- This is so that we still get warnings for dead code
@@ -1373,7 +1373,7 @@ analyzeControlFlow params t =
 
         -- Fill in the map with unreachable states for anything we didn't get to
         let baseStates = M.fromDistinctAscList $ map (\c -> (c, (unreachableState, unreachableState))) $ uncurry enumFromTo $ nodeRange $ cfGraph cfg
-        let allStates = M.unionWith (flip const) baseStates invokedStates
+        let allStates = M.union invokedStates baseStates
 
         -- Convert to external states
         let nodeToData = M.map (\(a,b) -> (internalToExternal a, internalToExternal b)) allStates

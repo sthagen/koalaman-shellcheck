@@ -491,15 +491,12 @@ checkWrongArithmeticAssignment params (T_SimpleCommand id [T_Assignment _ _ _ _ 
   sequence_ $ do
     str <- getNormalString val
     var:op:_ <- matchRegex regex str
-    Map.lookup var references
+    guard $ S.member var references
     return . warn (getId val) 2100 $
         "Use $((..)) for arithmetics, e.g. i=$((i " ++ op ++ " 2))"
   where
     regex = mkRegex "^([_a-zA-Z][_a-zA-Z0-9]*)([+*-]).+$"
-    references = foldl (flip ($)) Map.empty (map insertRef $ variableFlow params)
-    insertRef (Assignment (_, _, name, _)) =
-        Map.insert name ()
-    insertRef _ = Prelude.id
+    references = S.fromList [name | Assignment (_, _, name, _) <- variableFlow params]
 
     getNormalString (T_NormalWord _ words) = do
         parts <- mapM getLiterals words
@@ -974,32 +971,32 @@ prop_checkArrayWithoutIndex9 = verifyTree checkArrayWithoutIndex "read -r -a arr
 prop_checkArrayWithoutIndex10 = verifyTree checkArrayWithoutIndex "read -ra arr <<< 'foo bar'; echo \"$arr\""
 prop_checkArrayWithoutIndex11 = verifyNotTree checkArrayWithoutIndex "read -rpfoobar r; r=42"
 checkArrayWithoutIndex params _ =
-    doVariableFlowAnalysis readF writeF defaultMap (variableFlow params)
+    doVariableFlowAnalysis readF writeF defaultSet (variableFlow params)
   where
-    defaultMap = Map.fromList $ map (\x -> (x,())) arrayVariables
+    defaultSet = S.fromList arrayVariables
     readF _ (T_DollarBraced id _ token) _ = do
-        map <- get
+        s <- get
         return . maybeToList $ do
             name <- getLiteralString token
-            assigned <- Map.lookup name map
+            guard $ S.member name s
             return $ makeComment WarningC id 2128
                     "Expanding an array without an index only gives the first element."
     readF _ _ _ = return []
 
     writeF _ (T_Assignment id mode name [] _) _ (DataString _) = do
-        isArray <- gets (Map.member name)
+        isArray <- gets (S.member name)
         return $ if not isArray then [] else
             case mode of
                 Assign -> [makeComment WarningC id 2178 "Variable was used as an array but is now assigned a string."]
                 Append -> [makeComment WarningC id 2179 "Use array+=(\"item\") to append items to an array."]
 
     writeF _ t name (DataArray _) = do
-        modify (Map.insert name ())
+        modify (S.insert name)
         return []
     writeF _ expr name _ = do
         if isIndexed expr
-          then modify (Map.insert name ())
-          else modify (Map.delete name)
+          then modify (S.insert name)
+          else modify (S.delete name)
         return []
 
     isIndexed expr =
@@ -2380,15 +2377,9 @@ prop_checkUnused51 = verifyTree checkUnusedAssignments "x[y[z=1]]=1; echo ${x[@]
 checkUnusedAssignments params t = execWriter (mapM_ warnFor unused)
   where
     flow = variableFlow params
-    references = foldl (flip ($)) defaultMap (map insertRef flow)
-    insertRef (Reference (base, token, name)) =
-        Map.insert (stripSuffix name) ()
-    insertRef _ = id
+    references = Map.union (Map.fromList [(stripSuffix name, ()) | Reference (base, token, name) <- flow]) defaultMap
 
-    assignments = foldl (flip ($)) Map.empty (map insertAssignment flow)
-    insertAssignment (Assignment (_, token, name, _)) | isVariableName name =
-        Map.insert name token
-    insertAssignment _ = id
+    assignments = Map.fromList [(name, token) | Assignment (_, token, name, _) <- flow, isVariableName name]
 
     unused = Map.assocs $ Map.difference assignments references
 
@@ -3968,13 +3959,10 @@ prop_checkTranslatedStringVariable4 = verifyNot checkTranslatedStringVariable "v
 prop_checkTranslatedStringVariable5 = verifyNot checkTranslatedStringVariable "foo=var; bar=val2; $\"foo bar\""
 checkTranslatedStringVariable params (T_DollarDoubleQuoted id [T_Literal _ s])
   | all isVariableChar s
-  && Map.member s assignments
+  && S.member s assignments
   = warnWithFix id 2256 "This translated string is the name of a variable. Flip leading $ and \" if this should be a quoted substitution." (fix id)
   where
-    assignments = foldl (flip ($)) Map.empty (map insertAssignment $ variableFlow params)
-    insertAssignment (Assignment (_, token, name, _)) | isVariableName name =
-        Map.insert name token
-    insertAssignment _ = Prelude.id
+    assignments = S.fromList [name | Assignment (_, _, name, _) <- variableFlow params, isVariableName name]
     fix id = fixWith [replaceStart id params 2 "\"$"]
 checkTranslatedStringVariable _ _ = return ()
 
