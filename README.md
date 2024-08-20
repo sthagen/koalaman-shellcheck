@@ -113,6 +113,7 @@ Services and platforms that have ShellCheck pre-installed and ready to use:
 * [CircleCI](https://circleci.com) via the [ShellCheck Orb](https://circleci.com/orbs/registry/orb/circleci/shellcheck)
 * [Github](https://github.com/features/actions) (only Linux)
 * [Trunk Check](https://trunk.io/products/check) (universal linter; [allows you to explicitly version your shellcheck install](https://github.com/trunk-io/plugins/blob/bcbb361dcdbe4619af51ea7db474d7fb87540d20/.trunk/trunk.yaml#L32)) via the [shellcheck plugin](https://github.com/trunk-io/plugins/blob/main/linters/shellcheck/plugin.yaml)
+* [CodeRabbit](https://coderabbit.ai/)
 
 Most other services, including [GitLab](https://about.gitlab.com/), let you install
 ShellCheck yourself, either through the system's package manager (see [Installing](#installing)),
@@ -226,6 +227,11 @@ or use `koalaman/shellcheck-alpine` if you want a larger Alpine Linux based imag
 Using the [nix package manager](https://nixos.org/nix):
 ```sh
 nix-env -iA nixpkgs.shellcheck
+```
+
+Using the [Flox package manager](https://flox.dev/)
+```sh
+flox install shellcheck
 ```
 
 Alternatively, you can download pre-compiled binaries for the latest release here:
