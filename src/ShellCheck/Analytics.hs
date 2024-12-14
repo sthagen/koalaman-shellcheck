@@ -5074,19 +5074,16 @@ checkExpansionWithRedirection params t =
             (T_Pipeline _ _ t@(_:_)) -> checkCmd id (last t)
             _ -> return ()
 
-    checkCmd captureId (T_Redirecting _ redirs _) = walk captureId redirs
+    checkCmd captureId (T_Redirecting _ redirs _) = foldr (walk captureId) (return ()) redirs
 
-    walk captureId [] = return ()
-    walk captureId (t:rest) =
+    walk captureId t acc =
         case t of
             T_FdRedirect _ _ (T_IoDuplicate _ _ "1") -> return ()
             T_FdRedirect id "1" (T_IoDuplicate _ _ _) -> return ()
             T_FdRedirect id "" (T_IoDuplicate _ op _) | op `elem` [T_GREATAND (Id 0), T_Greater (Id 0)] -> emit id captureId True
             T_FdRedirect id str (T_IoFile _ op file) | str `elem` ["", "1"] && op `elem` [ T_DGREAT (Id 0), T_Greater (Id 0) ]  ->
-                if getLiteralString file == Just "/dev/null"
-                then emit id captureId False
-                else emit id captureId True
-            _ -> walk captureId rest
+                emit id captureId $ getLiteralString file /= Just "/dev/null"
+            _ -> acc
 
     emit redirectId captureId suggestTee = do
         warn captureId 2327 "This command substitution will be empty because the command's output gets redirected away."
