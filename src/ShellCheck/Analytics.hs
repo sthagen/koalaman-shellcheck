@@ -2825,6 +2825,10 @@ prop_checkUnpassedInFunctions11 = verifyNotTree checkUnpassedInFunctions "foo() 
 prop_checkUnpassedInFunctions12 = verifyNotTree checkUnpassedInFunctions "foo() { echo ${!var*}; }; foo;"
 prop_checkUnpassedInFunctions13 = verifyNotTree checkUnpassedInFunctions "# shellcheck disable=SC2120\nfoo() { echo $1; }\nfoo\n"
 prop_checkUnpassedInFunctions14 = verifyTree checkUnpassedInFunctions "foo() { echo $#; }; foo"
+prop_checkUnpassedInFunctions15 = verifyNotTree checkUnpassedInFunctions "foo() { echo ${1-x}; }; foo"
+prop_checkUnpassedInFunctions16 = verifyNotTree checkUnpassedInFunctions "foo() { echo ${1:-x}; }; foo"
+prop_checkUnpassedInFunctions17 = verifyNotTree checkUnpassedInFunctions "foo() { mycommand ${1+--verbose}; }; foo"
+prop_checkUnpassedInFunctions18 = verifyNotTree checkUnpassedInFunctions "foo() { if mycheck; then foo ${1?Missing}; fi; }; foo"
 checkUnpassedInFunctions params root =
     execWriter $ mapM_ warnForGroup referenceGroups
   where
@@ -2841,9 +2845,10 @@ checkUnpassedInFunctions params root =
         case x of
             Assignment (_, _, str, _) -> isPositional str
             _ -> False
+
     isPositionalReference function x =
         case x of
-            Reference (_, t, str) -> isPositional str && t `isDirectChildOf` function
+            Reference (_, t, str) -> isPositional str && t `isDirectChildOf` function && not (hasDefaultValue t)
             _ -> False
 
     isDirectChildOf child parent = fromMaybe False $ do
@@ -2857,6 +2862,7 @@ checkUnpassedInFunctions params root =
     referenceList :: [(String, Bool, Token)]
     referenceList = execWriter $
         doAnalysis (sequence_ . checkCommand) root
+
     checkCommand :: Token -> Maybe (Writer [(String, Bool, Token)] ())
     checkCommand t@(T_SimpleCommand _ _ (cmd:args)) = do
         str <- getLiteralString cmd
@@ -2866,6 +2872,22 @@ checkUnpassedInFunctions params root =
 
     isPositional str = str == "*" || str == "@" || str == "#"
         || (all isDigit str && str /= "0" && str /= "")
+
+    -- True if t is a variable that specifies a default value,
+    -- such as ${1-x} or ${1:-x}.
+    hasDefaultValue t =
+        case t of
+            T_DollarBraced _ True l ->
+                let str = concat $ oversimplify l
+                in isDefaultValueModifier $ getBracedModifier str
+            _ -> False
+
+    isDefaultValueModifier str =
+        case str of
+            ':':c:_ -> c `elem` handlesDefault
+            c:_ -> c `elem` handlesDefault
+            _ -> False
+      where handlesDefault = "-+?"
 
     isArgumentless (_, b, _) = b
     referenceGroups = Map.elems $ foldr updateWith Map.empty referenceList

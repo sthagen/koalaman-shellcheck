@@ -49,6 +49,7 @@ internalVariables = [
     "LINES", "MAIL", "MAILCHECK", "MAILPATH", "OPTERR", "PATH",
     "POSIXLY_CORRECT", "PROMPT_COMMAND", "PROMPT_DIRTRIM", "PS0", "PS1",
     "PS2", "PS3", "PS4", "SHELL", "TIMEFORMAT", "TMOUT", "TMPDIR",
+    "BASH_MONOSECONDS", "BASH_TRAPSIG", "GLOBSORT",
     "auto_resume", "histchars",
 
     -- Other
@@ -78,7 +79,7 @@ variablesWithoutSpaces = specialVariablesWithoutSpaces ++ [
     "EPOCHREALTIME", "EPOCHSECONDS", "LINENO", "OPTIND", "PPID", "RANDOM",
     "READLINE_ARGUMENT", "READLINE_MARK", "READLINE_POINT", "SECONDS",
     "SHELLOPTS", "SHLVL", "SRANDOM", "UID", "COLUMNS", "HISTFILESIZE",
-    "HISTSIZE", "LINES"
+    "HISTSIZE", "LINES", "BASH_MONOSECONDS", "BASH_TRAPSIG"
 
     -- shflags
     , "FLAGS_ERROR", "FLAGS_FALSE", "FLAGS_TRUE"
@@ -167,6 +168,7 @@ shellForExecutable name =
         "ksh"   -> return Ksh
         "ksh88" -> return Ksh
         "ksh93" -> return Ksh
+        "oksh"  -> return Ksh
         _ -> Nothing
 
 flagsForRead = "sreu:n:N:i:p:a:t:"
