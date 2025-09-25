@@ -148,8 +148,8 @@ prop_checkBashisms53 = verifyNot checkBashisms "#!/bin/sh\nprintf -- -f\n"
 prop_checkBashisms54 = verify checkBashisms "#!/bin/sh\nfoo+=bar"
 prop_checkBashisms55 = verify checkBashisms "#!/bin/sh\necho ${@%foo}"
 prop_checkBashisms56 = verifyNot checkBashisms "#!/bin/sh\necho ${##}"
-prop_checkBashisms57 = verifyNot checkBashisms "#!/bin/dash\nulimit -c 0"
-prop_checkBashisms58 = verify checkBashisms "#!/bin/sh\nulimit -c 0"
+prop_checkBashisms57 = verifyNot checkBashisms "#!/bin/dash\nulimit -m unlimited"
+prop_checkBashisms58 = verify checkBashisms "#!/bin/sh\nulimit -x unlimited"
 prop_checkBashisms59 = verify checkBashisms "#!/bin/sh\njobs -s"
 prop_checkBashisms60 = verifyNot checkBashisms "#!/bin/sh\njobs -p"
 prop_checkBashisms61 = verifyNot checkBashisms "#!/bin/sh\njobs -lp"
@@ -175,7 +175,7 @@ prop_checkBashisms80 = verifyNot checkBashisms "#!/bin/sh\nhash -r"
 prop_checkBashisms81 = verifyNot checkBashisms "#!/bin/dash\nhash -v"
 prop_checkBashisms82 = verifyNot checkBashisms "#!/bin/sh\nset -v +o allexport -o errexit -C"
 prop_checkBashisms83 = verifyNot checkBashisms "#!/bin/sh\nset --"
-prop_checkBashisms84 = verify checkBashisms "#!/bin/sh\nset -o pipefail"
+prop_checkBashisms84 = verifyNot checkBashisms "#!/bin/sh\nset -o pipefail"
 prop_checkBashisms85 = verify checkBashisms "#!/bin/sh\nset -B"
 prop_checkBashisms86 = verifyNot checkBashisms "#!/bin/dash\nset -o emacs"
 prop_checkBashisms87 = verify checkBashisms "#!/bin/sh\nset -o emacs"
@@ -383,8 +383,8 @@ checkBashisms = ForShell [Sh, Dash, BusyboxSh] $ \t -> do
         beginsWithDoubleDash = (`matches` mkRegex "^--.+$")
         longOptions          = Set.fromList
             [ "allexport", "errexit", "ignoreeof", "monitor", "noclobber"
-            , "noexec", "noglob", "nolog", "notify" , "nounset", "verbose"
-            , "vi", "xtrace" ]
+            , "noexec", "noglob", "nolog", "notify" , "nounset", "pipefail"
+            , "verbose", "vi", "xtrace" ]
 
     bashism t@(T_SimpleCommand id _ (cmd:rest)) =
         let name = fromMaybe "" $ getCommandName t
@@ -446,7 +446,12 @@ checkBashisms = ForShell [Sh, Dash, BusyboxSh] $ \t -> do
             ("readonly", Just ["p"]),
             ("trap", Just []),
             ("type", Just $ if isBusyboxSh then ["p"] else []),
-            ("ulimit", if isDash then Nothing else Just ["f"]),
+            ("ulimit",
+              Just $
+                if isDash
+                  then ["H", "S", "a", "c", "d", "f", "l", "m", "n", "p", "r", "s", "t", "v", "w"]
+                  else ["H", "S", "a", "c", "d", "f", "n", "s", "t", "v"] -- POSIX.1-2024
+            ),
             ("umask", Just ["S"]),
             ("unset", Just ["f", "v"]),
             ("wait", Just [])
@@ -483,7 +488,7 @@ checkBashisms = ForShell [Sh, Dash, BusyboxSh] $ \t -> do
         "BASH_ARGV", "BASH_ARGV0", "BASH_CMDS", "BASH_COMMAND",
         "BASH_EXECUTION_STRING", "BASH_LINENO", "BASH_REMATCH", "BASH_SOURCE",
         "BASH_SUBSHELL", "BASH_VERSINFO", "EPOCHREALTIME", "EPOCHSECONDS",
-        "FUNCNAME", "GROUPS", "MACHTYPE", "MAPFILE"
+        "FUNCNAME", "GROUPS", "MAPFILE"
         ]
     bashDynamicVars = [ "RANDOM", "SECONDS" ]
     dashVars = [ "_" ]
